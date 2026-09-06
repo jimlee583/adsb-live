@@ -11,13 +11,15 @@ from .sdr import DemoSource, DropOldestQueue, RtlSdrSource
 
 
 def _parse_gain(value: str) -> object:
-    if value.lower() == "auto":
-        return "auto"
+    key = value.strip().lower()
+    if key in ("max", "auto", "agc"):
+        return key
     try:
         return float(value)
     except ValueError as exc:  # pragma: no cover - argparse handles display
         raise argparse.ArgumentTypeError(
-            f"gain must be 'auto' or a number in dB, got {value!r}"
+            "gain must be 'max', 'agc', or a number in dB, "
+            f"got {value!r}"
         ) from exc
 
 
@@ -60,14 +62,32 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gain",
         type=_parse_gain,
-        default="auto",
-        help="Tuner gain in dB, or 'auto' (default: auto).",
+        default="max",
+        help=(
+            "Tuner gain: 'max' (default, best for ADS-B), 'agc' for tuner "
+            "auto-gain, or a specific value in dB (snapped to the nearest "
+            "supported step)."
+        ),
     )
     parser.add_argument(
         "--fft-size",
         type=_parse_pow2_int,
-        default=2048,
-        help="FFT size per hop; must be a power of two (default: 2048).",
+        default=256,
+        help=(
+            "FFT size per hop; must be a power of two. Small values (128-512) "
+            "make short ADS-B bursts pop in the waterfall because each burst "
+            "fills a whole hop instead of being averaged with quiet samples "
+            "(default: 256, i.e. ~107 us per hop at 2.4 MSPS)."
+        ),
+    )
+    parser.add_argument(
+        "--hops-per-read",
+        type=int,
+        default=16,
+        help=(
+            "Number of FFT hops read from the USB dongle per call. Larger "
+            "values reduce driver overhead (default: 16)."
+        ),
     )
     parser.add_argument(
         "--device-index",
@@ -78,14 +98,44 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--history",
         type=int,
-        default=400,
-        help="Number of waterfall rows to keep on screen (default: 400).",
+        default=500,
+        help="Number of waterfall rows to keep on screen (default: 500).",
+    )
+    parser.add_argument(
+        "--time-window",
+        type=float,
+        default=5.0,
+        help=(
+            "Seconds of history the waterfall should span. Combined with "
+            "--history, this sets how many FFT hops max-fold into a single "
+            "displayed row (default: 5.0)."
+        ),
     )
     parser.add_argument(
         "--refresh-ms",
         type=int,
         default=33,
         help="UI refresh period in milliseconds (default: 33 = ~30 Hz).",
+    )
+    parser.add_argument(
+        "--vmin",
+        type=float,
+        default=None,
+        help=(
+            "Pin the color-scale minimum in dB (disables auto-calibration). "
+            "Requires --vmax."
+        ),
+    )
+    parser.add_argument(
+        "--vmax",
+        type=float,
+        default=None,
+        help="Pin the color-scale maximum in dB. Requires --vmin.",
+    )
+    parser.add_argument(
+        "--list-gains",
+        action="store_true",
+        help="Open the dongle, print its supported gain steps, and exit.",
     )
     parser.add_argument(
         "--demo",
@@ -97,6 +147,29 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    if args.list_gains:
+        from .sdr import list_supported_gains
+
+        try:
+            gains = list_supported_gains(device_index=args.device_index)
+        except Exception as exc:  # noqa: BLE001
+            print(f"Failed to query gains: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 2
+        print("Supported tuner gains (dB):")
+        print("  " + ", ".join(f"{g:g}" for g in gains))
+        return 0
+
+    if (args.vmin is None) != (args.vmax is None):
+        print("--vmin and --vmax must be provided together.", file=sys.stderr)
+        return 2
+
+    levels_db = None
+    if args.vmin is not None and args.vmax is not None:
+        if args.vmax <= args.vmin:
+            print("--vmax must be greater than --vmin.", file=sys.stderr)
+            return 2
+        levels_db = (args.vmin, args.vmax)
 
     # Import Qt lazily so ``adsb-live --help`` works in headless environments.
     from pyqtgraph.Qt import QtWidgets
@@ -120,6 +193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             fft_size=args.fft_size,
             rows=rows_queue,
             device_index=args.device_index,
+            hops_per_read=args.hops_per_read,
         )
 
     source.start()
@@ -131,6 +205,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         rows=rows_queue,
         num_time_rows=args.history,
         refresh_ms=args.refresh_ms,
+        levels_db=levels_db,
+        time_window_s=args.time_window,
     )
     window.show()
 

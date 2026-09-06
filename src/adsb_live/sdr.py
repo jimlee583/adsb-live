@@ -92,20 +92,56 @@ class _BaseSource(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
 
-    def _emit(self, samples: np.ndarray) -> None:
-        power_db = self.spectrum.compute(samples)
-        self.rows.put(
-            SpectrumRow(
-                timestamp=time.monotonic(),
-                center_freq=self.center_freq,
-                sample_rate=self.sample_rate,
-                power_db=power_db,
+    def _emit_hops(self, samples: np.ndarray) -> None:
+        """Split a large buffer into FFT-sized hops and enqueue each row."""
+        n = self.fft_size
+        total = (samples.shape[0] // n) * n
+        if total == 0:
+            return
+        # Reshape into (hops, fft_size) without copying.
+        blocks = samples[:total].reshape(-1, n)
+        now = time.monotonic()
+        for i in range(blocks.shape[0]):
+            power_db = self.spectrum.compute(blocks[i])
+            self.rows.put(
+                SpectrumRow(
+                    timestamp=now,
+                    center_freq=self.center_freq,
+                    sample_rate=self.sample_rate,
+                    power_db=power_db,
+                )
             )
-        )
+
+
+# --- helpers -----------------------------------------------------------------
+
+
+def list_supported_gains(device_index: int = 0) -> list[float]:
+    """Open the device briefly and return its supported tuner gains (dB)."""
+    from rtlsdr import RtlSdr
+
+    sdr = RtlSdr(device_index=device_index)
+    try:
+        # pyrtlsdr exposes `.gain_values` as a list of integer tenths-of-dB,
+        # e.g. [0, 9, 14, ..., 496] for R820T2.
+        raw = list(sdr.gain_values)
+    finally:
+        sdr.close()
+    return [round(g / 10.0, 1) for g in raw]
+
+
+# --- sources -----------------------------------------------------------------
 
 
 class RtlSdrSource(_BaseSource):
-    """Background thread that reads I/Q from a real RTL-SDR dongle."""
+    """Background thread that reads I/Q from a real RTL-SDR dongle.
+
+    ``gain`` accepts one of:
+
+    * ``"max"`` (default) — pick the highest supported manual tuner gain.
+    * ``"agc"`` — enable the tuner's automatic gain control.
+    * A numeric value in dB — snapped to the nearest supported gain step.
+    """
 
     def __init__(
         self,
@@ -116,6 +152,7 @@ class RtlSdrSource(_BaseSource):
         fft_size: int,
         rows: DropOldestQueue,
         device_index: int = 0,
+        hops_per_read: int = 16,
     ) -> None:
         super().__init__(
             center_freq=center_freq,
@@ -126,11 +163,49 @@ class RtlSdrSource(_BaseSource):
         )
         self.gain = gain
         self.device_index = device_index
+        # USB reads must be a multiple of 512 bytes = 256 complex samples.
+        # `read_samples` also insists on a length that's a power of two, so
+        # multiplying by `hops_per_read` (default 16) keeps that invariant
+        # while giving the driver a chunk it can transfer efficiently.
+        self.hops_per_read = max(1, int(hops_per_read))
         self._configured_gain: Optional[str] = None
 
     @property
     def configured_gain(self) -> str:
         return self._configured_gain or "unknown"
+
+    def _apply_gain(self, sdr) -> None:
+        gain = self.gain
+        # Normalize string aliases.
+        if isinstance(gain, str):
+            key = gain.strip().lower()
+            if key in ("agc", "auto-hw", "hw-agc"):
+                sdr.gain = "auto"
+                self._configured_gain = "agc (tuner AGC)"
+                return
+            if key in ("max", "auto"):
+                supported = sorted(round(g / 10.0, 1) for g in sdr.gain_values)
+                chosen = supported[-1] if supported else 49.6
+                sdr.gain = chosen
+                self._configured_gain = f"{chosen:.1f} dB (max)"
+                return
+            # Fall through: try numeric parse.
+            try:
+                gain = float(key)
+            except ValueError as exc:
+                raise ValueError(
+                    f"unrecognised gain setting: {self.gain!r} "
+                    "(use 'max', 'agc', or a number in dB)"
+                ) from exc
+
+        gain_value = float(gain)
+        supported = sorted(round(g / 10.0, 1) for g in sdr.gain_values)
+        if supported:
+            chosen = min(supported, key=lambda g: abs(g - gain_value))
+        else:
+            chosen = gain_value
+        sdr.gain = chosen
+        self._configured_gain = f"{chosen:.1f} dB"
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -144,19 +219,16 @@ class RtlSdrSource(_BaseSource):
             sdr = RtlSdr(device_index=self.device_index)
             sdr.sample_rate = self.sample_rate
             sdr.center_freq = self.center_freq
-            if isinstance(self.gain, str) and self.gain.lower() == "auto":
-                sdr.gain = "auto"
-                self._configured_gain = "auto"
-            else:
-                gain_value = float(self.gain)
-                sdr.gain = gain_value
-                self._configured_gain = f"{gain_value:.1f} dB"
+            self._apply_gain(sdr)
 
+            chunk = self.fft_size * self.hops_per_read
             while not self._stop.is_set():
-                samples = sdr.read_samples(self.fft_size)
+                samples = sdr.read_samples(chunk)
                 if samples is None or len(samples) < self.fft_size:
                     continue
-                self._emit(np.asarray(samples[: self.fft_size], dtype=np.complex64))
+                self._emit_hops(
+                    np.asarray(samples, dtype=np.complex64)
+                )
         except BaseException as exc:  # noqa: BLE001
             self._error = exc
         finally:
@@ -228,7 +300,7 @@ class DemoSource(_BaseSource):
                     ).astype(np.complex64)
                     samples = samples + pulse
 
-                self._emit(samples.astype(np.complex64))
+                self._emit_hops(samples.astype(np.complex64))
 
                 next_deadline += hop_period
                 sleep_for = next_deadline - time.monotonic()
