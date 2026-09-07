@@ -82,7 +82,7 @@ class _BaseSource(threading.Thread):
         self.fft_size = int(fft_size)
         self.rows = rows
         self.spectrum = SpectrumComputer(self.fft_size)
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._error: Optional[BaseException] = None
 
     @property
@@ -90,7 +90,7 @@ class _BaseSource(threading.Thread):
         return self._error
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def _emit_hops(self, samples: np.ndarray) -> None:
         """Split a large buffer into FFT-sized hops and enqueue each row."""
@@ -222,7 +222,7 @@ class RtlSdrSource(_BaseSource):
             self._apply_gain(sdr)
 
             chunk = self.fft_size * self.hops_per_read
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 samples = sdr.read_samples(chunk)
                 if samples is None or len(samples) < self.fft_size:
                     continue
@@ -271,7 +271,7 @@ class DemoSource(_BaseSource):
             # scrolls at a natural speed in demo mode.
             hop_period = n / self.sample_rate
             next_deadline = time.monotonic()
-            while not self._stop.is_set():
+            while not self._stop_event.is_set():
                 noise = (
                     self._rng.standard_normal(n).astype(np.float32)
                     + 1j * self._rng.standard_normal(n).astype(np.float32)
@@ -305,7 +305,7 @@ class DemoSource(_BaseSource):
                 next_deadline += hop_period
                 sleep_for = next_deadline - time.monotonic()
                 if sleep_for > 0:
-                    self._stop.wait(sleep_for)
+                    self._stop_event.wait(sleep_for)
                 else:
                     next_deadline = time.monotonic()
         except BaseException as exc:  # noqa: BLE001
