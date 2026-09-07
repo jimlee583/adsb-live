@@ -37,6 +37,7 @@ class AircraftTrack:
     latitude: float | None = None
     longitude: float | None = None
     altitude_ft: float | None = None
+    on_ground: bool | None = None
     ground_speed_kt: float | None = None
     track_deg: float | None = None
     vertical_rate_fpm: float | None = None
@@ -72,6 +73,9 @@ class AircraftTrack:
             value = getattr(self, name)
             if value is not None:
                 _require_finite(name, value)
+
+        if self.on_ground is not None and not isinstance(self.on_ground, bool):
+            raise TypeError("on_ground must be a bool or None")
 
         if self.ground_speed_kt is not None:
             _require_finite("ground_speed_kt", self.ground_speed_kt)

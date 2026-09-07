@@ -1,0 +1,12 @@
+{
+  "now": 1788807100.0,
+  "messages": 50000,
+  "aircraft": [
+    {
+      "hex": "abc123",
+      "flight": "BEFORE",
+      "alt_baro": 24000,
+      "seen": 0.2
+    }
+  ]
+}

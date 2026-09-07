@@ -7,7 +7,8 @@ import signal
 import sys
 from typing import Sequence
 
-from .sdr import DemoSource, DropOldestQueue, RtlSdrSource
+from .decoder import Dump1090BinaryError, LiveDecoder
+from .sdr import DemoSource, DropOldestByteQueue, DropOldestQueue, RtlSdrSource
 
 
 def _parse_gain(value: str) -> object:
@@ -35,6 +36,24 @@ def _parse_pow2_int(value: str) -> int:
     if parsed <= 0 or (parsed & (parsed - 1)) != 0:
         raise argparse.ArgumentTypeError(
             f"fft size must be a positive power of two, got {value!r}"
+        )
+    return parsed
+
+
+def _parse_latitude(value: str) -> float:
+    parsed = float(value)
+    if not -90.0 <= parsed <= 90.0:
+        raise argparse.ArgumentTypeError(
+            f"latitude must be between -90 and 90, got {value!r}"
+        )
+    return parsed
+
+
+def _parse_longitude(value: str) -> float:
+    parsed = float(value)
+    if not -180.0 <= parsed <= 180.0:
+        raise argparse.ArgumentTypeError(
+            f"longitude must be between -180 and 180, got {value!r}"
         )
     return parsed
 
@@ -142,6 +161,57 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Use a synthetic signal source instead of the RTL-SDR dongle.",
     )
+    parser.add_argument(
+        "--decode",
+        action="store_true",
+        help=(
+            "Also demodulate ADS-B messages by piping raw I/Q into a child "
+            "dump1090 process. Requires dump1090-fa (or compatible) on PATH "
+            "or via --dump1090-path. Incompatible with --demo."
+        ),
+    )
+    parser.add_argument(
+        "--dump1090-path",
+        type=str,
+        default=None,
+        help=(
+            "Path to the dump1090 binary. Defaults to the first "
+            "'dump1090' or 'dump1090-fa' on PATH."
+        ),
+    )
+    parser.add_argument(
+        "--lat",
+        type=_parse_latitude,
+        default=None,
+        help=(
+            "Receiver latitude in degrees. Passed to dump1090 for surface "
+            "position decoding and range checks. Requires --lon."
+        ),
+    )
+    parser.add_argument(
+        "--lon",
+        type=_parse_longitude,
+        default=None,
+        help="Receiver longitude in degrees. Requires --lat.",
+    )
+    parser.add_argument(
+        "--stale-after",
+        type=_parse_positive_float,
+        default=60.0,
+        help=(
+            "Drop aircraft tracks that have not been seen for this many "
+            "seconds (default: 60)."
+        ),
+    )
+    parser.add_argument(
+        "--decode-poll-interval",
+        type=_parse_positive_float,
+        default=1.0,
+        help=(
+            "How often to re-read dump1090's aircraft.json, in seconds "
+            "(default: 1.0)."
+        ),
+    )
     return parser
 
 
@@ -171,12 +241,54 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
         levels_db = (args.vmin, args.vmax)
 
+    if (args.lat is None) != (args.lon is None):
+        print("--lat and --lon must be provided together.", file=sys.stderr)
+        return 2
+
+    if args.decode:
+        if args.demo:
+            print(
+                "--decode is incompatible with --demo (synthetic noise "
+                "contains no Mode-S messages).",
+                file=sys.stderr,
+            )
+            return 2
+        if abs(args.rate - 2.4e6) > 1.0:
+            print(
+                "--decode requires --rate 2.4e6 (dump1090 UC8 assumes "
+                "2.4 MHz).",
+                file=sys.stderr,
+            )
+            return 2
+        if abs(args.freq - 1090e6) > 1e3:
+            print(
+                f"warning: --freq {args.freq:.0f} Hz is not 1090 MHz; "
+                "dump1090 will still attempt to decode.",
+                file=sys.stderr,
+            )
+
     # Import Qt lazily so ``adsb-live --help`` works in headless environments.
     from pyqtgraph.Qt import QtWidgets
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
     rows_queue = DropOldestQueue(maxsize=512)
+
+    decoder: LiveDecoder | None = None
+    iq_sink: DropOldestByteQueue | None = None
+    if args.decode:
+        try:
+            decoder = LiveDecoder(
+                binary_path=args.dump1090_path,
+                receiver_lat=args.lat,
+                receiver_lon=args.lon,
+                poll_interval_s=args.decode_poll_interval,
+                stale_after_s=args.stale_after,
+            )
+        except Dump1090BinaryError as exc:
+            print(f"{exc}", file=sys.stderr)
+            return 2
+        iq_sink = decoder.iq_sink
 
     if args.demo:
         source = DemoSource(
@@ -194,9 +306,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             rows=rows_queue,
             device_index=args.device_index,
             hops_per_read=args.hops_per_read,
+            iq_sink=iq_sink,
         )
 
     source.start()
+    if decoder is not None:
+        decoder.start()
 
     from .ui import WaterfallWindow
 
@@ -207,6 +322,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         refresh_ms=args.refresh_ms,
         levels_db=levels_db,
         time_window_s=args.time_window,
+        decoder=decoder,
     )
     window.show()
 
@@ -216,6 +332,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         exit_code = app.exec()
     finally:
+        if decoder is not None:
+            decoder.stop()
         source.stop()
         source.join(timeout=2.0)
     return int(exit_code)

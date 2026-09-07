@@ -1,0 +1,26 @@
+{
+  "now": 1788807001.25,
+  "messages": 12010,
+  "aircraft": [
+    {
+      "hex": "abc123",
+      "alt_geom": 18000,
+      "geom_rate": 256,
+      "seen": 1.5
+    },
+    {
+      "alt_baro": 9000,
+      "seen": 0.1
+    },
+    {
+      "hex": "def456",
+      "lat": "not-a-number",
+      "seen": 0.2
+    },
+    {
+      "hex": "123456",
+      "seen": -1
+    },
+    "not-an-aircraft-record"
+  ]
+}
