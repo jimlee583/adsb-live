@@ -1,0 +1,35 @@
+{
+  "now": 1788807000.25,
+  "messages": 12000,
+  "aircraft": [
+    {
+      "hex": "a1b2c3",
+      "flight": " UAL123 ",
+      "alt_baro": 32000,
+      "lat": 39.8561,
+      "lon": -104.6737,
+      "gs": 451.2,
+      "track": 87.5,
+      "baro_rate": -640,
+      "squawk": "1200",
+      "category": "a3",
+      "rssi": -18.4,
+      "seen": 0.4
+    },
+    {
+      "hex": "c0ffee",
+      "flight": "N123AB",
+      "alt_baro": "ground",
+      "lat": 39.8617,
+      "lon": -104.6731,
+      "gs": 12.0,
+      "track": 270.0,
+      "seen": 0.1
+    },
+    {
+      "hex": "~123abc",
+      "alt_baro": 5000,
+      "seen": 0.2
+    }
+  ]
+}

@@ -50,6 +50,15 @@ def test_aircraft_track_validates_domain_values(
         AircraftTrack(icao="ABC123", **kwargs)  # type: ignore[arg-type]
 
 
+def test_aircraft_track_rejects_non_boolean_ground_state() -> None:
+    with pytest.raises(TypeError, match="on_ground must be a bool"):
+        AircraftTrack(
+            icao="ABC123",
+            last_seen=1.0,
+            on_ground="yes",  # type: ignore[arg-type]
+        )
+
+
 def test_empty_callsign_and_category_are_normalized_to_none() -> None:
     track = AircraftTrack(
         icao="ABC123",
