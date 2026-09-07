@@ -163,6 +163,25 @@ def test_poll_once_updates_store_and_source_health() -> None:
     assert source.health.consecutive_failures == 0
     assert source.health.snapshots_processed == 1
     assert source.health.rejected_records == snapshot.rejected_records == 1
+    assert source.health.last_message_count == snapshot.message_count
+
+
+def test_poll_once_populates_message_count_from_snapshot() -> None:
+    payloads = iter([
+        json.dumps({"now": 1.0, "messages": 42, "aircraft": []}),
+        json.dumps({"now": 2.0, "messages": 100, "aircraft": []}),
+    ])
+    source = Dump1090JsonSource(
+        reader=lambda: next(payloads),
+        store=TrackStore(stale_after_s=60.0, clock=lambda: 2.0),
+        clock=lambda: 2.0,
+    )
+
+    source.poll_once()
+    assert source.health.last_message_count == 42
+
+    source.poll_once()
+    assert source.health.last_message_count == 100
 
 
 def test_poll_once_expires_aircraft_older_than_store_limit() -> None:

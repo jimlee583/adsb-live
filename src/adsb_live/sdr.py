@@ -66,6 +66,50 @@ class DropOldestQueue:
         return items
 
 
+class DropOldestByteQueue:
+    """Thread-safe byte-block queue that discards the oldest block on overflow.
+
+    Used to tee raw ``uint8`` I/Q blocks from the SDR reader to a child
+    decoder process. The decoder must never backpressure the reader: if the
+    downstream consumer stalls, old blocks are dropped so the radio thread
+    keeps up with the USB stream.
+    """
+
+    def __init__(self, maxsize: int = 64) -> None:
+        self._q: queue.Queue[bytes] = queue.Queue(maxsize=maxsize)
+        self._dropped = 0
+        self._lock = threading.Lock()
+
+    def put(self, item: bytes) -> None:
+        while True:
+            try:
+                self._q.put_nowait(item)
+                return
+            except queue.Full:
+                try:
+                    self._q.get_nowait()
+                    with self._lock:
+                        self._dropped += 1
+                except queue.Empty:
+                    continue
+
+    def get(self, timeout: Optional[float] = None) -> Optional[bytes]:
+        """Return the next block, waiting up to ``timeout`` seconds.
+
+        Returns ``None`` on timeout so the caller can check for shutdown
+        without swallowing exceptions.
+        """
+        try:
+            return self._q.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    @property
+    def dropped(self) -> int:
+        with self._lock:
+            return self._dropped
+
+
 class _BaseSource(threading.Thread):
     def __init__(
         self,
@@ -153,6 +197,7 @@ class RtlSdrSource(_BaseSource):
         rows: DropOldestQueue,
         device_index: int = 0,
         hops_per_read: int = 16,
+        iq_sink: Optional["DropOldestByteQueue"] = None,
     ) -> None:
         super().__init__(
             center_freq=center_freq,
@@ -168,6 +213,7 @@ class RtlSdrSource(_BaseSource):
         # multiplying by `hops_per_read` (default 16) keeps that invariant
         # while giving the driver a chunk it can transfer efficiently.
         self.hops_per_read = max(1, int(hops_per_read))
+        self._iq_sink = iq_sink
         self._configured_gain: Optional[str] = None
 
     @property
@@ -207,6 +253,21 @@ class RtlSdrSource(_BaseSource):
         sdr.gain = chosen
         self._configured_gain = f"{chosen:.1f} dB"
 
+    def _process_bytes(self, sdr: object, raw: bytes) -> None:
+        """Tee the raw byte block to the decoder sink and emit FFT hops.
+
+        Split out from :meth:`run` so it can be exercised in tests with a
+        fake ``sdr`` object without spinning up a real reader thread.
+        """
+        if raw is None or len(raw) < 2 * self.fft_size:
+            return
+        if self._iq_sink is not None:
+            # ``bytes(raw)`` ensures the sink owns an immutable copy even if
+            # pyrtlsdr hands us a mutable buffer backed by the USB read.
+            self._iq_sink.put(bytes(raw))
+        samples = sdr.packed_bytes_to_iq(raw)
+        self._emit_hops(np.asarray(samples, dtype=np.complex64))
+
     def run(self) -> None:  # noqa: D401
         try:
             from rtlsdr import RtlSdr
@@ -222,13 +283,10 @@ class RtlSdrSource(_BaseSource):
             self._apply_gain(sdr)
 
             chunk = self.fft_size * self.hops_per_read
+            byte_count = 2 * chunk  # UC8: interleaved uint8 I/Q
             while not self._stop_event.is_set():
-                samples = sdr.read_samples(chunk)
-                if samples is None or len(samples) < self.fft_size:
-                    continue
-                self._emit_hops(
-                    np.asarray(samples, dtype=np.complex64)
-                )
+                raw = sdr.read_bytes(byte_count)
+                self._process_bytes(sdr, raw)
         except BaseException as exc:  # noqa: BLE001
             self._error = exc
         finally:

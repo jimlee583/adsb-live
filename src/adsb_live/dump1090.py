@@ -41,6 +41,12 @@ class Dump1090SourceHealth:
     snapshots_processed: int = 0
     rejected_records: int = 0
     decoder_restarts: int = 0
+    #: Most recent ``messages`` counter from dump1090's ``aircraft.json``.
+    #: This is the total number of valid Mode-S frames dump1090 has decoded
+    #: since it started. A value that stays at 0 while snapshots are being
+    #: read is the strongest signal that the receiver is not seeing any
+    #: ADS-B, as opposed to the decoder failing to build tracks.
+    last_message_count: int | None = None
 
 
 class SnapshotReader(Protocol):
@@ -296,6 +302,7 @@ class Dump1090JsonSource(threading.Thread):
                 decoder_restarts=(
                     self._health.decoder_restarts + int(restarted)
                 ),
+                last_message_count=snapshot.message_count,
             )
         return snapshot
 

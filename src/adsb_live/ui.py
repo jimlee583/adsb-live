@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
 import numpy as np
 import pyqtgraph as pg
-from pyqtgraph.Qt import QtCore, QtWidgets
+from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
+from .aircraft_columns import Column, RowContext, build_columns
+from .decoder import LiveDecoder
 from .sdr import DropOldestQueue, _BaseSource
+from .tracks import AircraftTrack, TrackStore
 
 
 # Starting range for the color scale before auto-calibration kicks in.
@@ -16,6 +20,103 @@ INITIAL_LEVELS_DB = (-100.0, 0.0)
 
 # Auto-calibration collects this many hops before locking the color scale.
 CALIBRATION_HOPS = 400
+
+
+class AircraftTableModel(QtCore.QAbstractTableModel):
+    """Qt table model backed by an :class:`~adsb_live.tracks.TrackStore` snapshot.
+
+    The model does not observe the store directly; instead, the owning
+    window calls :meth:`refresh` on a low-frequency timer to swap in a
+    fresh snapshot. Refresh cost is proportional to the number of active
+    aircraft (typically < 200) so this is cheap.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: TrackStore,
+        columns: tuple[Column, ...],
+        receiver: tuple[float, float] | None = None,
+        parent: Optional[QtCore.QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._store = store
+        self._columns = columns
+        self._receiver = receiver
+        self._tracks: tuple[AircraftTrack, ...] = ()
+        self._now = time.monotonic()
+
+    # -- QAbstractTableModel API ---------------------------------------
+    def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
+        if parent.isValid():
+            return 0
+        return len(self._tracks)
+
+    def columnCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
+        if parent.isValid():
+            return 0
+        return len(self._columns)
+
+    def headerData(  # noqa: N802
+        self,
+        section: int,
+        orientation: QtCore.Qt.Orientation,
+        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
+    ) -> object:
+        if role != QtCore.Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == QtCore.Qt.Orientation.Horizontal:
+            if 0 <= section < len(self._columns):
+                return self._columns[section].label
+        return None
+
+    def data(
+        self,
+        index: QtCore.QModelIndex,
+        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
+    ) -> object:
+        if not index.isValid():
+            return None
+        row = index.row()
+        col = index.column()
+        if row < 0 or row >= len(self._tracks):
+            return None
+        if col < 0 or col >= len(self._columns):
+            return None
+        column = self._columns[col]
+        ctx = RowContext(
+            track=self._tracks[row], now=self._now, receiver=self._receiver
+        )
+        if role == QtCore.Qt.ItemDataRole.DisplayRole:
+            return column.display(ctx)
+        if role == QtCore.Qt.ItemDataRole.TextAlignmentRole and column.numeric:
+            return int(
+                QtCore.Qt.AlignmentFlag.AlignRight
+                | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+        if role == QtCore.Qt.ItemDataRole.UserRole:
+            # Sort role: expose the raw comparable key so the proxy sorts
+            # numerically rather than lexicographically.
+            key = column.sort_key(ctx)
+            if key is None:
+                # None sorts last regardless of ascending/descending.
+                return float("inf")
+            return key
+        return None
+
+    # -- refresh -------------------------------------------------------
+    def refresh(self, *, now: float | None = None) -> int:
+        """Reload from the store. Returns the current aircraft count."""
+        snapshot = self._store.snapshot()
+        self._now = time.monotonic() if now is None else float(now)
+        self.beginResetModel()
+        self._tracks = snapshot
+        self.endResetModel()
+        return len(snapshot)
+
+    @property
+    def columns(self) -> tuple[Column, ...]:
+        return self._columns
 
 
 class WaterfallWindow(QtWidgets.QMainWindow):
@@ -37,15 +138,19 @@ class WaterfallWindow(QtWidgets.QMainWindow):
         refresh_ms: int = 33,
         levels_db: Optional[tuple[float, float]] = None,
         time_window_s: float = 5.0,
+        decoder: Optional[LiveDecoder] = None,
+        table_refresh_ms: int = 1000,
     ) -> None:
         super().__init__()
         self._source = source
         self._rows_queue = rows
+        self._decoder = decoder
         self._num_time_rows = int(num_time_rows)
         self._fft_size = source.fft_size
         self._sample_rate = source.sample_rate
         self._center_freq = source.center_freq
         self._hop_period_s = self._fft_size / self._sample_rate
+        self._aircraft_count = 0
 
         # How many FFT hops max-fold into one displayed waterfall row.
         hop_rate = 1.0 / self._hop_period_s
@@ -95,7 +200,65 @@ class WaterfallWindow(QtWidgets.QMainWindow):
 
         self._graphics = pg.GraphicsLayoutWidget(show=False)
         self._graphics.setBackground("#101014")
-        vbox.addWidget(self._graphics, stretch=1)
+
+        if self._decoder is not None:
+            receiver = None
+            lat = self._decoder.process.receiver_lat
+            lon = self._decoder.process.receiver_lon
+            if lat is not None and lon is not None:
+                receiver = (lat, lon)
+            self._receiver = receiver
+            columns = build_columns(receiver=receiver)
+            self._aircraft_model = AircraftTableModel(
+                store=self._decoder.store,
+                columns=columns,
+                receiver=receiver,
+                parent=self,
+            )
+            self._aircraft_proxy = QtCore.QSortFilterProxyModel(self)
+            self._aircraft_proxy.setSourceModel(self._aircraft_model)
+            self._aircraft_proxy.setSortRole(QtCore.Qt.ItemDataRole.UserRole)
+            self._aircraft_view = QtWidgets.QTableView()
+            self._aircraft_view.setModel(self._aircraft_proxy)
+            self._aircraft_view.setSortingEnabled(True)
+            self._aircraft_view.sortByColumn(
+                0, QtCore.Qt.SortOrder.AscendingOrder
+            )
+            self._aircraft_view.setSelectionBehavior(
+                QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+            )
+            self._aircraft_view.setSelectionMode(
+                QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+            )
+            self._aircraft_view.setAlternatingRowColors(True)
+            self._aircraft_view.verticalHeader().setVisible(False)
+            header = self._aircraft_view.horizontalHeader()
+            header.setSectionResizeMode(
+                QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
+            header.setStretchLastSection(True)
+            self._aircraft_view.setFont(
+                QtGui.QFont("Menlo", 11)
+            )
+
+            splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+            splitter.addWidget(self._graphics)
+            splitter.addWidget(self._aircraft_view)
+            splitter.setStretchFactor(0, 3)
+            splitter.setStretchFactor(1, 2)
+            splitter.setChildrenCollapsible(False)
+            vbox.addWidget(splitter, stretch=1)
+
+            self._table_timer = QtCore.QTimer(self)
+            self._table_timer.setTimerType(QtCore.Qt.TimerType.CoarseTimer)
+            self._table_timer.timeout.connect(self._on_table_tick)
+            self._table_timer.start(int(table_refresh_ms))
+        else:
+            self._receiver = None
+            self._aircraft_model = None
+            self._aircraft_proxy = None
+            self._aircraft_view = None
+            vbox.addWidget(self._graphics, stretch=1)
 
         self.setCentralWidget(central)
 
@@ -201,13 +364,67 @@ class WaterfallWindow(QtWidgets.QMainWindow):
             )
         else:
             live = ""
-        return (
+        base = (
             f"source={source_kind}   center={self._center_freq / 1e6:.3f} MHz   "
             f"rate={self._sample_rate / 1e6:.3f} MSPS   fft={self._fft_size}   "
             f"gain={gain}   hops/s={rows_per_sec:.0f}   "
             f"window={window_s:.1f}s ({self._hops_per_display_row}x max-hold)   "
             f"levels=[{vmin:.1f}, {vmax:.1f}] {cal_state}{live}"
         )
+        if self._decoder is None:
+            return base
+        return base + "\n" + self._decoder_status_text()
+
+    def _decoder_status_text(self) -> str:
+        decoder = self._decoder
+        assert decoder is not None
+        proc_health = decoder.process.health
+        poll_health = decoder.poller.health
+        proc_state = "running" if proc_health.running else "stopped"
+        if proc_health.restarts:
+            proc_state += f" (restarts={proc_health.restarts})"
+        bytes_written = proc_health.bytes_written
+        if bytes_written >= 1_000_000:
+            bytes_str = f"{bytes_written / 1e6:.1f} MB"
+        elif bytes_written >= 1_000:
+            bytes_str = f"{bytes_written / 1e3:.0f} kB"
+        else:
+            bytes_str = f"{bytes_written} B"
+
+        # Counts we can actually reason about:
+        #   messages: dump1090's own count of valid Mode-S frames decoded
+        #             (from aircraft.json). If this stays at 0 while
+        #             snapshots grow, the receiver isn't seeing any ADS-B.
+        #   positions: aircraft in the store with a known lat/lon right now.
+        messages = poll_health.last_message_count
+        messages_str = "?" if messages is None else f"{messages:,}"
+        positions = sum(
+            1
+            for t in decoder.store.snapshot()
+            if t.latitude is not None and t.longitude is not None
+        )
+
+        dropped = decoder.iq_sink.dropped
+        # Only surface *real* errors, not dump1090's informational stderr.
+        # ``poll_health.last_error`` is set when the poller itself failed
+        # (e.g. aircraft.json missing or malformed).
+        err_tail = (
+            f"   err={poll_health.last_error}"
+            if poll_health.last_error
+            else ""
+        )
+        return (
+            f"decoder={proc_state}   aircraft={self._aircraft_count}   "
+            f"positions={positions}   messages={messages_str}   "
+            f"snapshots={poll_health.snapshots_processed}   "
+            f"stdin={bytes_str}   sink-drops={dropped}{err_tail}"
+        )
+
+    def _on_table_tick(self) -> None:
+        if self._aircraft_model is None:
+            return
+        self._aircraft_count = self._aircraft_model.refresh()
+        self._maybe_update_status(force=True)
 
     def _apply_levels(self, vmin: float, vmax: float) -> None:
         self._levels = (float(vmin), float(vmax))
@@ -301,9 +518,9 @@ class WaterfallWindow(QtWidgets.QMainWindow):
 
         self._maybe_update_status()
 
-    def _maybe_update_status(self) -> None:
+    def _maybe_update_status(self, *, force: bool = False) -> None:
         elapsed_ms = self._last_status_ts.elapsed()
-        if elapsed_ms >= 500:
+        if force or elapsed_ms >= 500:
             rate = self._rows_since_status * 1000.0 / max(elapsed_ms, 1)
             self._status_label.setText(self._status_text(rows_per_sec=rate))
             self._rows_since_status = 0
@@ -319,6 +536,9 @@ class WaterfallWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt signature)
         try:
             self._source.stop()
-            self._source.join(timeout=2.0)
+            if self._source.is_alive():
+                self._source.join(timeout=2.0)
+            if self._decoder is not None:
+                self._decoder.stop()
         finally:
             super().closeEvent(event)
