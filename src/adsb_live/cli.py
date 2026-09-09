@@ -266,6 +266,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "dump1090 will still attempt to decode.",
                 file=sys.stderr,
             )
+        if args.lat is None or args.lon is None:
+            print(
+                "hint: aircraft map is disabled without --lat/--lon; "
+                "pass both to see the receiver-centered map.",
+                file=sys.stderr,
+            )
 
     # Import Qt lazily so ``adsb-live --help`` works in headless environments.
     from pyqtgraph.Qt import QtWidgets

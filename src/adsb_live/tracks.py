@@ -5,8 +5,10 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from typing import NamedTuple
 
 
 def _normalize_icao(value: str) -> str:
@@ -98,21 +100,47 @@ class AircraftTrack:
             object.__setattr__(self, "category", category or None)
 
 
+class PositionSample(NamedTuple):
+    """One point of an aircraft's trail.
+
+    ``timestamp`` uses the same monotonic clock as :class:`TrackStore`.
+    ``altitude_ft`` may be ``None`` when only lat/lon are known at the
+    time the sample is appended.
+    """
+
+    timestamp: float
+    latitude: float
+    longitude: float
+    altitude_ft: float | None
+
+
 class TrackStore:
-    """Thread-safe collection containing the latest active aircraft tracks."""
+    """Thread-safe collection containing the latest active aircraft tracks.
+
+    In addition to the latest state, the store keeps a bounded position
+    history per aircraft so that map views can draw trails without
+    maintaining independent state. ``history_size`` bounds the deque per
+    ICAO; the default (120) is about two minutes of ADS-B position
+    reports at typical rates.
+    """
 
     def __init__(
         self,
         *,
         stale_after_s: float = 60.0,
+        history_size: int = 120,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         _require_finite("stale_after_s", stale_after_s)
         if stale_after_s <= 0.0:
             raise ValueError("stale_after_s must be positive")
+        if history_size <= 0:
+            raise ValueError("history_size must be positive")
         self.stale_after_s = float(stale_after_s)
+        self.history_size = int(history_size)
         self._clock = clock
         self._tracks: dict[str, AircraftTrack] = {}
+        self._histories: dict[str, deque[PositionSample]] = {}
         self._lock = threading.RLock()
 
     def upsert(self, track: AircraftTrack) -> bool:
@@ -120,6 +148,9 @@ class TrackStore:
 
         Returns ``False`` and leaves the store unchanged when an update is
         older than the currently stored state for the same aircraft.
+        Appends a :class:`PositionSample` to the aircraft's history when
+        the new track carries a lat/lon that differs from the last stored
+        sample.
         """
 
         if not isinstance(track, AircraftTrack):
@@ -129,6 +160,28 @@ class TrackStore:
             if current is not None and track.last_seen < current.last_seen:
                 return False
             self._tracks[track.icao] = track
+            if track.latitude is not None and track.longitude is not None:
+                history = self._histories.get(track.icao)
+                if history is None:
+                    history = deque(maxlen=self.history_size)
+                    self._histories[track.icao] = history
+                    should_append = True
+                else:
+                    last = history[-1] if history else None
+                    should_append = (
+                        last is None
+                        or last.latitude != track.latitude
+                        or last.longitude != track.longitude
+                    )
+                if should_append:
+                    history.append(
+                        PositionSample(
+                            timestamp=track.last_seen,
+                            latitude=track.latitude,
+                            longitude=track.longitude,
+                            altitude_ft=track.altitude_ft,
+                        )
+                    )
             return True
 
     def snapshot(self, *, now: float | None = None) -> tuple[AircraftTrack, ...]:
@@ -137,6 +190,29 @@ class TrackStore:
         with self._lock:
             self._expire_stale_locked(self._resolve_now(now))
             return tuple(self._tracks[icao] for icao in sorted(self._tracks))
+
+    def history(self, icao: str) -> tuple[PositionSample, ...]:
+        """Return a copy of the position history for one aircraft."""
+
+        key = _normalize_icao(icao)
+        with self._lock:
+            entries = self._histories.get(key)
+            if entries is None:
+                return ()
+            return tuple(entries)
+
+    def histories(
+        self, *, now: float | None = None
+    ) -> Mapping[str, tuple[PositionSample, ...]]:
+        """Return all position histories in one lock acquisition.
+
+        Stale tracks are expired first so callers do not draw trails for
+        aircraft that have dropped out of the store.
+        """
+
+        with self._lock:
+            self._expire_stale_locked(self._resolve_now(now))
+            return {icao: tuple(entries) for icao, entries in self._histories.items()}
 
     def expire_stale(
         self, *, now: float | None = None
@@ -157,4 +233,8 @@ class TrackStore:
             for icao, track in self._tracks.items()
             if now - track.last_seen > self.stale_after_s
         )
-        return tuple(self._tracks.pop(icao) for icao in stale_icaos)
+        expired: list[AircraftTrack] = []
+        for icao in stale_icaos:
+            expired.append(self._tracks.pop(icao))
+            self._histories.pop(icao, None)
+        return tuple(expired)

@@ -92,6 +92,30 @@ def test_main_rejects_lone_lat_without_importing_qt(
     assert "--lat and --lon must be provided together." in capsys.readouterr().err
 
 
+def test_main_hints_when_decode_missing_receiver(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--decode without --lat/--lon should print the map-off hint."""
+
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+    from adsb_live.decoder import Dump1090BinaryError
+
+    def _explode(*_args: object, **_kwargs: object) -> object:
+        raise Dump1090BinaryError("boom")
+
+    monkeypatch.setattr(cli, "LiveDecoder", _explode)
+
+    exit_code = cli.main(["--decode"])
+
+    stderr = capsys.readouterr().err
+    assert exit_code == 2
+    assert "aircraft map is disabled without --lat/--lon" in stderr
+
+
 @pytest.mark.parametrize("value", ["91", "-91", "abc"])
 def test_parse_latitude_rejects_out_of_range(value: str) -> None:
     with pytest.raises((argparse.ArgumentTypeError, ValueError)):

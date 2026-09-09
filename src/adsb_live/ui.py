@@ -11,6 +11,7 @@ from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from .aircraft_columns import Column, RowContext, build_columns
 from .decoder import LiveDecoder
+from .map_view import AircraftMapWidget
 from .sdr import DropOldestQueue, _BaseSource
 from .tracks import AircraftTrack, TrackStore
 
@@ -20,6 +21,91 @@ INITIAL_LEVELS_DB = (-100.0, 0.0)
 
 # Auto-calibration collects this many hops before locking the color scale.
 CALIBRATION_HOPS = 400
+
+
+class _SelectionCoordinator(QtCore.QObject):
+    """Keep the aircraft table and the map showing the same selected ICAO.
+
+    Signals travel in both directions:
+
+    * Table row selected --> resolve ICAO from column 0 --> map highlight.
+    * Map click --> table row selection --> table sync.
+
+    The ``_applying`` guard breaks the loop so a programmatic change on
+    one side does not bounce back into the other.
+    """
+
+    def __init__(
+        self,
+        *,
+        view: QtWidgets.QTableView,
+        proxy: QtCore.QSortFilterProxyModel,
+        model: "AircraftTableModel",
+        map_widget: Optional[AircraftMapWidget],
+    ) -> None:
+        super().__init__(view)
+        self._view = view
+        self._proxy = proxy
+        self._model = model
+        self._map = map_widget
+        self._applying = False
+        view.selectionModel().currentRowChanged.connect(self._on_row_changed)
+        if map_widget is not None:
+            map_widget.aircraftSelected.connect(self._on_map_selected)
+
+    def _on_row_changed(
+        self, current: QtCore.QModelIndex, _previous: QtCore.QModelIndex
+    ) -> None:
+        if self._applying or self._map is None:
+            return
+        icao = self._icao_from_proxy_index(current)
+        self._applying = True
+        try:
+            self._map.set_selected_icao(icao)
+        finally:
+            self._applying = False
+
+    def _on_map_selected(self, icao: str) -> None:
+        if self._applying:
+            return
+        self._applying = True
+        try:
+            if not icao:
+                self._view.clearSelection()
+                return
+            row = self._find_row_for_icao(icao)
+            if row is None:
+                self._view.clearSelection()
+                return
+            proxy_index = self._proxy.index(row, 0)
+            self._view.setCurrentIndex(proxy_index)
+            self._view.selectRow(row)
+        finally:
+            self._applying = False
+
+    def _icao_from_proxy_index(
+        self, proxy_index: QtCore.QModelIndex
+    ) -> str | None:
+        if not proxy_index.isValid():
+            return None
+        source = self._proxy.mapToSource(proxy_index)
+        icao_col = 0  # build_columns always puts ICAO first.
+        value = self._model.data(
+            self._model.index(source.row(), icao_col),
+            QtCore.Qt.ItemDataRole.DisplayRole,
+        )
+        return str(value) if value else None
+
+    def _find_row_for_icao(self, icao: str) -> int | None:
+        target = icao.strip().upper()
+        for proxy_row in range(self._proxy.rowCount()):
+            proxy_index = self._proxy.index(proxy_row, 0)
+            value = self._proxy.data(
+                proxy_index, QtCore.Qt.ItemDataRole.DisplayRole
+            )
+            if value and str(value).strip().upper() == target:
+                return proxy_row
+        return None
 
 
 class AircraftTableModel(QtCore.QAbstractTableModel):
@@ -151,6 +237,11 @@ class WaterfallWindow(QtWidgets.QMainWindow):
         self._center_freq = source.center_freq
         self._hop_period_s = self._fft_size / self._sample_rate
         self._aircraft_count = 0
+        # Primed before the status label is built so ``_status_text`` /
+        # ``_decoder_status_text`` can safely read it during construction.
+        # Replaced with an ``AircraftMapWidget`` further down when the
+        # decoder is present *and* a receiver lat/lon is configured.
+        self._aircraft_map: AircraftMapWidget | None = None
 
         # How many FFT hops max-fold into one displayed waterfall row.
         hop_rate = 1.0 / self._hop_period_s
@@ -243,11 +334,30 @@ class WaterfallWindow(QtWidgets.QMainWindow):
 
             splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
             splitter.addWidget(self._graphics)
+            if receiver is not None:
+                self._aircraft_map = AircraftMapWidget(
+                    store=self._decoder.store,
+                    receiver=receiver,
+                    parent=self,
+                )
+                splitter.addWidget(self._aircraft_map)
             splitter.addWidget(self._aircraft_view)
-            splitter.setStretchFactor(0, 3)
-            splitter.setStretchFactor(1, 2)
+            if self._aircraft_map is not None:
+                splitter.setStretchFactor(0, 3)
+                splitter.setStretchFactor(1, 2)
+                splitter.setStretchFactor(2, 2)
+            else:
+                splitter.setStretchFactor(0, 3)
+                splitter.setStretchFactor(1, 2)
             splitter.setChildrenCollapsible(False)
             vbox.addWidget(splitter, stretch=1)
+
+            self._selection_coordinator = _SelectionCoordinator(
+                view=self._aircraft_view,
+                proxy=self._aircraft_proxy,
+                model=self._aircraft_model,
+                map_widget=self._aircraft_map,
+            )
 
             self._table_timer = QtCore.QTimer(self)
             self._table_timer.setTimerType(QtCore.Qt.TimerType.CoarseTimer)
@@ -258,6 +368,8 @@ class WaterfallWindow(QtWidgets.QMainWindow):
             self._aircraft_model = None
             self._aircraft_proxy = None
             self._aircraft_view = None
+            self._aircraft_map = None
+            self._selection_coordinator = None
             vbox.addWidget(self._graphics, stretch=1)
 
         self.setCentralWidget(central)
@@ -413,17 +525,22 @@ class WaterfallWindow(QtWidgets.QMainWindow):
             if poll_health.last_error
             else ""
         )
+        map_note = (
+            "" if self._aircraft_map is not None else "   map=off (needs --lat/--lon)"
+        )
         return (
             f"decoder={proc_state}   aircraft={self._aircraft_count}   "
             f"positions={positions}   messages={messages_str}   "
             f"snapshots={poll_health.snapshots_processed}   "
-            f"stdin={bytes_str}   sink-drops={dropped}{err_tail}"
+            f"stdin={bytes_str}   sink-drops={dropped}{map_note}{err_tail}"
         )
 
     def _on_table_tick(self) -> None:
         if self._aircraft_model is None:
             return
         self._aircraft_count = self._aircraft_model.refresh()
+        if self._aircraft_map is not None:
+            self._aircraft_map.refresh()
         self._maybe_update_status(force=True)
 
     def _apply_levels(self, vmin: float, vmax: float) -> None:

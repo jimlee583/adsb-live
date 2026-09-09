@@ -168,3 +168,91 @@ def test_concurrent_upserts_keep_latest_state_for_each_aircraft() -> None:
     snapshot = store.snapshot()
     assert len(snapshot) == 16
     assert all(track.last_seen == 9.0 for track in snapshot)
+
+
+def test_track_store_history_appends_only_on_new_position() -> None:
+    store = TrackStore(stale_after_s=60.0, clock=lambda: 100.0)
+
+    store.upsert(
+        AircraftTrack(icao="A12345", last_seen=1.0, latitude=40.0, longitude=-105.0)
+    )
+    store.upsert(
+        AircraftTrack(icao="A12345", last_seen=2.0, latitude=40.0, longitude=-105.0)
+    )
+    store.upsert(
+        AircraftTrack(icao="A12345", last_seen=3.0, latitude=40.1, longitude=-105.0)
+    )
+
+    history = store.history("A12345")
+    assert len(history) == 2
+    assert history[0].latitude == 40.0
+    assert history[1].latitude == 40.1
+    # Timestamp on the sample tracks the source's last_seen.
+    assert history[1].timestamp == 3.0
+
+
+def test_track_store_history_ignores_updates_without_position() -> None:
+    store = TrackStore(stale_after_s=60.0, clock=lambda: 100.0)
+
+    store.upsert(AircraftTrack(icao="A12345", last_seen=1.0, callsign="TEST"))
+    store.upsert(
+        AircraftTrack(icao="A12345", last_seen=2.0, latitude=39.0, longitude=-104.0)
+    )
+    store.upsert(AircraftTrack(icao="A12345", last_seen=3.0, callsign="TEST"))
+
+    history = store.history("A12345")
+    assert len(history) == 1
+    assert history[0].latitude == 39.0
+
+
+def test_track_store_history_is_bounded_by_history_size() -> None:
+    store = TrackStore(stale_after_s=60.0, history_size=3, clock=lambda: 100.0)
+    for i in range(6):
+        store.upsert(
+            AircraftTrack(
+                icao="A12345",
+                last_seen=float(i),
+                latitude=40.0 + 0.1 * i,
+                longitude=-105.0,
+            )
+        )
+
+    history = store.history("A12345")
+    assert len(history) == 3
+    assert [round(sample.latitude, 3) for sample in history] == [40.3, 40.4, 40.5]
+
+
+def test_track_store_expiry_removes_position_history() -> None:
+    now = {"value": 100.0}
+    store = TrackStore(stale_after_s=10.0, clock=lambda: now["value"])
+    store.upsert(
+        AircraftTrack(icao="A12345", last_seen=100.0, latitude=40.0, longitude=-105.0)
+    )
+    assert store.history("A12345")
+
+    now["value"] = 200.0
+    store.snapshot()
+
+    assert store.history("A12345") == ()
+    assert "A12345" not in store.histories()
+
+
+def test_track_store_histories_returns_snapshot_copy() -> None:
+    store = TrackStore(stale_after_s=60.0, clock=lambda: 100.0)
+    store.upsert(
+        AircraftTrack(icao="A12345", last_seen=90.0, latitude=40.0, longitude=-105.0)
+    )
+
+    view = store.histories()
+    assert set(view) == {"A12345"}
+    # Snapshot is decoupled from the store: further upserts do not leak in.
+    store.upsert(
+        AircraftTrack(icao="A12345", last_seen=95.0, latitude=41.0, longitude=-105.0)
+    )
+    assert len(view["A12345"]) == 1
+    assert len(store.history("A12345")) == 2
+
+
+def test_track_store_rejects_non_positive_history_size() -> None:
+    with pytest.raises(ValueError, match="history_size must be positive"):
+        TrackStore(history_size=0)

@@ -16,7 +16,7 @@ from .dump1090 import (
     parse_aircraft_json,
 )
 from .sdr import DropOldestByteQueue, DropOldestQueue
-from .tracks import AircraftTrack, TrackStore
+from .tracks import AircraftTrack, PositionSample, TrackStore
 
 __all__ = [
     "AircraftTrack",
@@ -32,6 +32,7 @@ __all__ = [
     "FileSnapshotReader",
     "HttpSnapshotReader",
     "LiveDecoder",
+    "PositionSample",
     "TrackStore",
     "__version__",
     "parse_aircraft_json",
