@@ -117,6 +117,28 @@ Notes:
 - The child process's `aircraft.json` is written to a private temp directory
   and cleaned up on exit; nothing is left behind.
 
+### Aircraft map
+
+When `--decode` is combined with `--lat` and `--lon`, a receiver-centered
+polar map appears between the waterfall and the aircraft table. It is a
+plain radar-scope view — no map tiles, no network dependency — with the
+receiver at the origin, north up, east right, distances in nautical miles.
+
+- **Range rings** at 10, 25, 50, 100, and 200 nm. The outer view snaps to
+  the smallest ring that contains every currently tracked aircraft (floor
+  50 nm, ceiling 250 nm).
+- **Aircraft dots** are colored by altitude (blue < 5k ft, cyan < 15k,
+  green < 25k, yellow < 35k, orange < 45k, red above; grey when on the
+  ground or altitude is unknown).
+- **Trails** show each aircraft's recent path. Trail length is bounded
+  per aircraft; the default (`120` samples) is roughly two minutes of
+  live positions.
+- **Selection is bidirectional**: clicking a dot selects the matching row
+  in the aircraft table, and vice versa.
+
+Without `--lat`/`--lon` the map is hidden and the status bar shows
+`map=off (needs --lat/--lon)`.
+
 ## What you should see
 
 - **Top panel** — instantaneous power spectral density (blue) with a slowly
@@ -149,14 +171,16 @@ src/adsb_live/
   spectrum.py            # Hann-windowed FFT -> dB power row
   decoder.py             # dump1090 child-process supervisor + LiveDecoder
   dump1090.py            # aircraft.json parser + polling ingestion thread
-  tracks.py              # AircraftTrack model + thread-safe TrackStore
+  tracks.py              # AircraftTrack + TrackStore with bounded position history
   aircraft_columns.py    # Pure column definitions and row formatters (no Qt)
-  ui.py                  # PyQtGraph window: PSD + waterfall + aircraft table
+  map_view.py            # Polar projection + AircraftMapWidget
+  ui.py                  # PyQtGraph window: PSD + waterfall + map + table
 ```
 
 ## Roadmap
 
-- Geographic map view of tracks
+- Real geographic tiles behind the polar map (currently only the polar
+  receiver-centered view is implemented)
 - Optional browser dashboard sharing the same reader
 - Field-level merge in `TrackStore` so intermittent positions do not
   overwrite previously observed values

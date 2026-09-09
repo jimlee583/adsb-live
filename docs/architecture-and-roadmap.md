@@ -20,10 +20,15 @@ At runtime, the application:
 - reports live spectrum statistics and receiver configuration;
 - when `--decode` is passed, tees the raw UC8 byte stream to a child
   `dump1090` process, ingests its `aircraft.json`, and displays a live
-  aircraft table alongside the waterfall.
+  aircraft table alongside the waterfall;
+- when `--decode` is combined with `--lat`/`--lon`, also renders a
+  receiver-centered polar map with range rings, altitude-colored
+  aircraft dots, and per-aircraft trails sourced from the bounded
+  position history maintained by `TrackStore`.
 
-The application currently has no geographic map, no network API, and no
-persistent aircraft history beyond the in-memory `TrackStore`.
+The application currently has no external geographic map tiles and no
+network API. Aircraft state (including trails) is held only in the
+in-memory `TrackStore`.
 
 ## 2. Architecture
 
@@ -90,6 +95,18 @@ also mounts an `AircraftTableModel` in a `QSortFilterProxyModel` and refreshes
 it on a separate ~1 Hz timer, decoupled from the 33 ms spectrum tick. Column
 definitions and row-formatting helpers live in `src/adsb_live/aircraft_columns.py`,
 which is Qt-free so it can be exercised in tests without a display.
+
+When receiver coordinates are known, the window swaps its two-pane
+splitter for a three-pane `[graphics, map, table]` layout and mounts an
+`AircraftMapWidget` from `src/adsb_live/map_view.py`. The map is a
+`pg.PlotWidget` in receiver-centered nautical-mile coordinates: aircraft
+dots are colored by altitude, trails are drawn from
+`TrackStore.histories()`, and the outer view snaps to the smallest of a
+fixed set of range rings that contains every visible aircraft. A
+`_SelectionCoordinator` keeps the table's current row and the map's
+highlighted aircraft in sync, using an `_applying` guard to break the
+callback loop. `map_view.py` also exposes pure helpers (`polar_xy`,
+`altitude_color`, `auto_range_nm`) that are testable without Qt.
 
 ### Application entry point
 
@@ -211,9 +228,13 @@ than maintaining independent tracking state.
 
 ## 5. Rendering
 
-There is no geographic map in the current application.
+The window can host up to three panes side-by-side:
 
-The existing spectrum display has two linked PyQtGraph plots:
+```text
+[ spectrum + waterfall ]  [ polar aircraft map ]  [ aircraft table ]
+```
+
+The spectrum display has two linked PyQtGraph plots:
 
 - The upper plot draws the latest PSD and a slowly decaying peak-hold curve.
 - The lower plot uses an `ImageItem` with the viridis color map to display a
@@ -227,9 +248,12 @@ Several FFT hops are combined using a per-bin maximum before a row is
 displayed. This preserves short ADS-B bursts that would otherwise disappear
 if quiet hops were averaged with them.
 
-A future aircraft map should be a separate view driven by `AircraftTrack`
-positions. It should not be implemented as an extension of the waterfall
-image.
+The polar aircraft map is a plain `pg.PlotWidget` with the receiver at
+`(0, 0)`, north up, east right, distances in nautical miles. It does not
+render map tiles and has no network dependency. Range rings (10, 25, 50,
+100, 200 nm) auto-hide above the current outer range. Trails come from
+`TrackStore.histories()`, so history bookkeeping stays in the store and
+the view is stateless between ticks aside from cached Qt items.
 
 ## 6. Tests and deployment
 
@@ -252,8 +276,13 @@ GitHub Actions with Python 3.12. Coverage:
   the real `dump1090` binary.
 - `test_aircraft_columns.py`: pure column formatting, age/distance
   rendering, and sort keys.
+- `test_map_view.py`: pure helpers (`polar_xy` orientation,
+  `altitude_color` bands, `auto_range_nm` snapping) and an offscreen-Qt
+  smoke test that constructs `AircraftMapWidget`, refreshes it against
+  an in-memory `TrackStore`, and exercises bidirectional selection.
 - `test_cli.py`: CLI validation paths (levels, `--decode` compatibility,
-  `--lat`/`--lon` pairing) that never import Qt.
+  `--lat`/`--lon` pairing) that never import Qt, plus a hint check for
+  `--decode` without a receiver.
 
 Qt smoke tests can run with an offscreen platform and the demo source but
 are not part of the CI suite today. Tests that require an actual RTL-SDR
@@ -299,14 +328,18 @@ formatting helpers in `src/adsb_live/aircraft_columns.py`. Columns include
 ICAO, callsign, altitude, ground speed, track, vertical rate, squawk,
 position, distance/bearing (when `--lat`/`--lon` is set), RSSI, and age.
 
-### Feature 3: geographic aircraft map
+### Feature 3: geographic aircraft map — polar view done
 
-Add a separate map view with aircraft icons, heading, trails, selection,
-receiver position, and range rings. Selecting an aircraft should synchronize
-the map and table.
+Implemented as `AircraftMapWidget` in `src/adsb_live/map_view.py` with a
+bounded `PositionSample` history maintained inside `TrackStore`. The
+current view is a receiver-centered polar radar scope with range rings,
+altitude-colored dots, per-aircraft trails, and bidirectional
+table/map selection wired through a small `_SelectionCoordinator`.
 
-The basic map UI can be developed using fake tracks. Real integration depends
-on the shared `AircraftTrack` contract and decoded positions.
+Real geographic map tiles remain future work: the natural upgrade path
+is a `QWebEngineView` running Leaflet against the same `store.histories()`
+snapshot over a local WebSocket, which would coexist with the polar view
+as a low-latency default.
 
 ### Feature 4: shared event layer and browser dashboard
 
