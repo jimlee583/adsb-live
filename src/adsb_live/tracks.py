@@ -7,8 +7,27 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
-from typing import NamedTuple
+from dataclasses import dataclass, fields
+from typing import Any, NamedTuple
+
+
+#: Optional fields on :class:`AircraftTrack` that :meth:`TrackStore.upsert`
+#: merges across snapshots. An incoming ``None`` on one of these fields
+#: means "not observed in this snapshot", not "cleared" -- the previously
+#: observed value is preserved until it ages past ``field_stale_after_s``.
+_MERGEABLE_FIELDS: tuple[str, ...] = (
+    "callsign",
+    "latitude",
+    "longitude",
+    "altitude_ft",
+    "on_ground",
+    "ground_speed_kt",
+    "track_deg",
+    "vertical_rate_fpm",
+    "squawk",
+    "category",
+    "signal_db",
+)
 
 
 def _normalize_icao(value: str) -> str:
@@ -100,6 +119,29 @@ class AircraftTrack:
             object.__setattr__(self, "category", category or None)
 
 
+def _assert_mergeable_fields_cover_track() -> None:
+    """Fail import if a new optional field on ``AircraftTrack`` is added
+    without also listing it in ``_MERGEABLE_FIELDS``.
+
+    Without this guard, a new field would silently be reset to its
+    default on every snapshot -- exactly the bug field-level merging
+    exists to prevent.
+    """
+
+    excluded = {"icao", "last_seen", "first_seen"}
+    optional = tuple(
+        field.name for field in fields(AircraftTrack) if field.name not in excluded
+    )
+    if optional != _MERGEABLE_FIELDS:
+        raise RuntimeError(
+            "_MERGEABLE_FIELDS is out of sync with AircraftTrack; "
+            f"expected {optional}, got {_MERGEABLE_FIELDS}"
+        )
+
+
+_assert_mergeable_fields_cover_track()
+
+
 class PositionSample(NamedTuple):
     """One point of an aircraft's trail.
 
@@ -122,6 +164,14 @@ class TrackStore:
     maintaining independent state. ``history_size`` bounds the deque per
     ICAO; the default (120) is about two minutes of ADS-B position
     reports at typical rates.
+
+    Snapshots from ``dump1090`` intermittently drop fields for aircraft
+    that are still being tracked -- weak-signal position dropouts are
+    the most common example. ``upsert`` merges each incoming track with
+    the previously stored one so that an incoming ``None`` preserves the
+    last observed value instead of clobbering it. Preserved values age
+    out after ``field_stale_after_s`` so a callsign observed once
+    minutes ago cannot linger indefinitely.
     """
 
     def __init__(
@@ -129,6 +179,7 @@ class TrackStore:
         *,
         stale_after_s: float = 60.0,
         history_size: int = 120,
+        field_stale_after_s: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         _require_finite("stale_after_s", stale_after_s)
@@ -136,21 +187,31 @@ class TrackStore:
             raise ValueError("stale_after_s must be positive")
         if history_size <= 0:
             raise ValueError("history_size must be positive")
+        _require_finite("field_stale_after_s", field_stale_after_s)
+        if field_stale_after_s <= 0.0:
+            raise ValueError("field_stale_after_s must be positive")
         self.stale_after_s = float(stale_after_s)
         self.history_size = int(history_size)
+        self.field_stale_after_s = float(field_stale_after_s)
         self._clock = clock
         self._tracks: dict[str, AircraftTrack] = {}
         self._histories: dict[str, deque[PositionSample]] = {}
+        #: Per-ICAO timestamp of the last snapshot that carried a non-None
+        #: value for each field. Used to age preserved values out.
+        self._field_seen: dict[str, dict[str, float]] = {}
         self._lock = threading.RLock()
 
     def upsert(self, track: AircraftTrack) -> bool:
-        """Insert or replace a track.
+        """Insert or field-level merge a track.
 
         Returns ``False`` and leaves the store unchanged when an update is
-        older than the currently stored state for the same aircraft.
-        Appends a :class:`PositionSample` to the aircraft's history when
-        the new track carries a lat/lon that differs from the last stored
-        sample.
+        strictly older than the currently stored state for the same aircraft.
+        Fields that are ``None`` on the incoming track preserve the
+        previously observed value (subject to ``field_stale_after_s``),
+        so a snapshot that transiently drops a field does not blank it in
+        the store. Appends a :class:`PositionSample` to the aircraft's
+        history when the merged track carries a fresh lat/lon that
+        differs from the last stored sample.
         """
 
         if not isinstance(track, AircraftTrack):
@@ -159,12 +220,19 @@ class TrackStore:
             current = self._tracks.get(track.icao)
             if current is not None and track.last_seen < current.last_seen:
                 return False
-            self._tracks[track.icao] = track
+
+            merged = self._merge_locked(current, track)
+            self._tracks[merged.icao] = merged
+
+            # Only append to history when *this* snapshot actually carried a
+            # position. Preserved lat/lon from a previous snapshot has already
+            # been recorded in the history and must not be duplicated with
+            # the newer timestamp.
             if track.latitude is not None and track.longitude is not None:
-                history = self._histories.get(track.icao)
+                history = self._histories.get(merged.icao)
                 if history is None:
                     history = deque(maxlen=self.history_size)
-                    self._histories[track.icao] = history
+                    self._histories[merged.icao] = history
                     should_append = True
                 else:
                     last = history[-1] if history else None
@@ -183,6 +251,61 @@ class TrackStore:
                         )
                     )
             return True
+
+    def _merge_locked(
+        self, current: AircraftTrack | None, incoming: AircraftTrack
+    ) -> AircraftTrack:
+        """Combine ``incoming`` with ``current`` using field-level merging.
+
+        Fields present on ``incoming`` win outright and refresh their
+        per-field ``last observed at`` timestamp. Fields absent from
+        ``incoming`` fall back to the previously stored value, provided
+        that value was observed within ``field_stale_after_s`` of the
+        incoming snapshot; otherwise the field ages out to ``None``.
+        ``first_seen`` collapses to the earliest observation across all
+        merges so it stays meaningful over an aircraft's lifetime.
+        """
+
+        seen = self._field_seen.setdefault(incoming.icao, {})
+
+        if current is None:
+            for name in _MERGEABLE_FIELDS:
+                if getattr(incoming, name) is not None:
+                    seen[name] = incoming.last_seen
+            return incoming
+
+        earliest_first_seen = current.first_seen
+        if (
+            incoming.first_seen is not None
+            and earliest_first_seen is not None
+            and incoming.first_seen < earliest_first_seen
+        ):
+            earliest_first_seen = incoming.first_seen
+
+        merged_values: dict[str, Any] = {}
+        for name in _MERGEABLE_FIELDS:
+            new_value = getattr(incoming, name)
+            if new_value is not None:
+                merged_values[name] = new_value
+                seen[name] = incoming.last_seen
+                continue
+            cached = getattr(current, name)
+            if cached is None:
+                merged_values[name] = None
+                continue
+            last_field_ts = seen.get(name, current.last_seen)
+            if incoming.last_seen - last_field_ts <= self.field_stale_after_s:
+                merged_values[name] = cached
+            else:
+                seen.pop(name, None)
+                merged_values[name] = None
+
+        return AircraftTrack(
+            icao=incoming.icao,
+            last_seen=incoming.last_seen,
+            first_seen=earliest_first_seen,
+            **merged_values,
+        )
 
     def snapshot(self, *, now: float | None = None) -> tuple[AircraftTrack, ...]:
         """Return active tracks sorted by ICAO, expiring stale entries first."""
@@ -237,4 +360,5 @@ class TrackStore:
         for icao in stale_icaos:
             expired.append(self._tracks.pop(icao))
             self._histories.pop(icao, None)
+            self._field_seen.pop(icao, None)
         return tuple(expired)

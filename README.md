@@ -182,5 +182,4 @@ src/adsb_live/
 - Real geographic tiles behind the polar map (currently only the polar
   receiver-centered view is implemented)
 - Optional browser dashboard sharing the same reader
-- Field-level merge in `TrackStore` so intermittent positions do not
-  overwrite previously observed values
+- Selected-aircraft detail pane with altitude/speed history plots

@@ -268,8 +268,10 @@ GitHub Actions with Python 3.12. Coverage:
   byte-tap contract (using a fake `sdr` object).
 - `test_dump1090.py`: `aircraft.json` parsing, HTTP/file readers, and the
   polling source with fixture snapshots.
-- `test_tracks.py`: `AircraftTrack` validation, `TrackStore` upsert and
-  stale-expiry semantics.
+- `test_tracks.py`: `AircraftTrack` validation, `TrackStore` upsert,
+  stale-expiry, and field-level merge semantics (partial-snapshot
+  preservation, per-field aging, position-dropout trail continuity,
+  and `first_seen` collapse across merges).
 - `test_decoder.py`: `Dump1090Process` argv construction, PATH
   resolution, restart accounting, stderr capture, and `LiveDecoder`
   tempdir lifecycle, all driven against a small Python fake instead of
@@ -360,13 +362,25 @@ release checks once application packaging is selected.
 
 This work protects the current RF display while the data model and UI grow.
 
-### Feature 6: `TrackStore` field-level merges
+### Feature 6: `TrackStore` field-level merges — done
 
-`TrackStore.upsert` currently replaces the whole record on every snapshot,
-so if `dump1090` transiently drops a field (e.g. position), the previously
-observed value is lost until it is re-received. Add field-level merge
-semantics keyed by ICAO address so partial snapshots do not clobber
-recently-observed data.
+`TrackStore.upsert` now merges each incoming `AircraftTrack` with the
+previously stored one instead of replacing it wholesale. An incoming
+`None` on any optional field means "not observed in this snapshot" and
+preserves the previously observed value; a non-`None` value wins
+outright and refreshes its per-field observed-at timestamp. Preserved
+values age out after `field_stale_after_s` (default 30 s) so a callsign
+observed once minutes ago cannot linger indefinitely. `first_seen`
+collapses to the earliest observation across all merges.
+
+Position history bookkeeping is unchanged: a preserved lat/lon from a
+previous snapshot is *not* appended to the trail again, so trails
+continue as a single point through weak-signal position dropouts
+instead of accumulating duplicates. A module-level guard
+(`_assert_mergeable_fields_cover_track`) fails import if a new optional
+field is added to `AircraftTrack` without being listed in
+`_MERGEABLE_FIELDS`, preventing silent regressions to snapshot-replace
+semantics for new columns.
 
 ## Parallel development plan
 
