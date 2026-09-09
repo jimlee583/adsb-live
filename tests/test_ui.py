@@ -59,8 +59,9 @@ class _StubDecoder:
         *,
         receiver_lat: float | None,
         receiver_lon: float | None,
+        store: TrackStore | None = None,
     ) -> None:
-        self.store = TrackStore(stale_after_s=60.0)
+        self.store = store if store is not None else TrackStore(stale_after_s=60.0)
         self.iq_sink = DropOldestByteQueue(maxsize=64)
         self.process = _StubProcess(
             receiver_lat=receiver_lat, receiver_lon=receiver_lon
@@ -82,7 +83,8 @@ def _make_source() -> DemoSource:
 
 
 def test_waterfall_window_builds_with_decoder_and_receiver(qt_app) -> None:
-    """--decode with --lat/--lon: a map widget is created and shown."""
+    """--decode with --lat/--lon: map and detail widgets are created."""
+    from adsb_live.aircraft_detail import AircraftDetailWidget
     from adsb_live.map_view import AircraftMapWidget
     from adsb_live.ui import WaterfallWindow
 
@@ -91,6 +93,9 @@ def test_waterfall_window_builds_with_decoder_and_receiver(qt_app) -> None:
     window = WaterfallWindow(source=source, rows=source.rows, decoder=decoder)
     try:
         assert isinstance(window._aircraft_map, AircraftMapWidget)
+        assert isinstance(window._aircraft_detail, AircraftDetailWidget)
+        # Detail pane starts empty until an aircraft is selected.
+        assert window._aircraft_detail.selected_icao is None
         status = window._status_text(rows_per_sec=0.0)
         assert "map=off" not in status
         assert "decoder=" in status
@@ -99,7 +104,8 @@ def test_waterfall_window_builds_with_decoder_and_receiver(qt_app) -> None:
 
 
 def test_waterfall_window_builds_with_decoder_without_receiver(qt_app) -> None:
-    """--decode without --lat/--lon: no map, and status flags it."""
+    """--decode without --lat/--lon: no map, but detail pane still present."""
+    from adsb_live.aircraft_detail import AircraftDetailWidget
     from adsb_live.ui import WaterfallWindow
 
     source = _make_source()
@@ -107,7 +113,54 @@ def test_waterfall_window_builds_with_decoder_without_receiver(qt_app) -> None:
     window = WaterfallWindow(source=source, rows=source.rows, decoder=decoder)
     try:
         assert window._aircraft_map is None
+        # Detail pane doesn't need a receiver location.
+        assert isinstance(window._aircraft_detail, AircraftDetailWidget)
         status = window._status_text(rows_per_sec=0.0)
         assert "map=off (needs --lat/--lon)" in status
+    finally:
+        window.close()
+
+
+def test_waterfall_window_detail_pane_reflects_selection(qt_app) -> None:
+    """Selecting an aircraft via the coordinator drives the detail pane."""
+    from adsb_live.tracks import AircraftTrack
+    from adsb_live.ui import WaterfallWindow
+
+    # Pin the store clock so the seeded tracks are not treated as
+    # already-stale relative to the real ``time.monotonic()``.
+    now = {"value": 102.0}
+    store = TrackStore(stale_after_s=600.0, clock=lambda: now["value"])
+    for i in range(3):
+        store.upsert(
+            AircraftTrack(
+                icao="A12345",
+                last_seen=100.0 + i,
+                latitude=40.02,
+                longitude=-105.25,
+                altitude_ft=30_000.0 + 50 * i,
+                ground_speed_kt=420.0,
+                vertical_rate_fpm=48.0,
+            )
+        )
+
+    source = _make_source()
+    decoder = _StubDecoder(
+        receiver_lat=40.015, receiver_lon=-105.2705, store=store
+    )
+
+    window = WaterfallWindow(source=source, rows=source.rows, decoder=decoder)
+    try:
+        # Force the table to refresh so the row exists in the proxy model.
+        window._on_table_tick()
+
+        # Drive the coordinator from the map side; this hits the
+        # row-lookup + detail-pane switch code path in one shot.
+        assert window._selection_coordinator is not None
+        window._selection_coordinator._on_map_selected("A12345")
+
+        assert window._aircraft_detail is not None
+        assert window._aircraft_detail.selected_icao == "A12345"
+        drawn = window._aircraft_detail.refresh(now=102.0)
+        assert drawn == 3
     finally:
         window.close()

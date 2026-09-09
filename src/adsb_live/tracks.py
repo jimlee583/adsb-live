@@ -156,6 +156,22 @@ class PositionSample(NamedTuple):
     altitude_ft: float | None
 
 
+class TelemetrySample(NamedTuple):
+    """One point in an aircraft's altitude / speed / vertical-rate history.
+
+    Recorded on every :meth:`TrackStore.upsert` (one sample per snapshot
+    from ``dump1090``) so the detail pane can plot climb profiles and
+    speed history for a selected aircraft. Any of the numeric fields
+    may be ``None`` when that field was not (yet) observed; downstream
+    plotting should skip such gaps.
+    """
+
+    timestamp: float
+    altitude_ft: float | None
+    ground_speed_kt: float | None
+    vertical_rate_fpm: float | None
+
+
 class TrackStore:
     """Thread-safe collection containing the latest active aircraft tracks.
 
@@ -179,6 +195,7 @@ class TrackStore:
         *,
         stale_after_s: float = 60.0,
         history_size: int = 120,
+        telemetry_size: int = 1200,
         field_stale_after_s: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -187,15 +204,22 @@ class TrackStore:
             raise ValueError("stale_after_s must be positive")
         if history_size <= 0:
             raise ValueError("history_size must be positive")
+        if telemetry_size <= 0:
+            raise ValueError("telemetry_size must be positive")
         _require_finite("field_stale_after_s", field_stale_after_s)
         if field_stale_after_s <= 0.0:
             raise ValueError("field_stale_after_s must be positive")
         self.stale_after_s = float(stale_after_s)
         self.history_size = int(history_size)
+        self.telemetry_size = int(telemetry_size)
         self.field_stale_after_s = float(field_stale_after_s)
         self._clock = clock
         self._tracks: dict[str, AircraftTrack] = {}
         self._histories: dict[str, deque[PositionSample]] = {}
+        #: Per-ICAO altitude / speed / vertical-rate history, one sample
+        #: per snapshot, bounded by ``telemetry_size`` (default 1200
+        #: samples is about 20 minutes at the default 1 Hz poll rate).
+        self._telemetry: dict[str, deque[TelemetrySample]] = {}
         #: Per-ICAO timestamp of the last snapshot that carried a non-None
         #: value for each field. Used to age preserved values out.
         self._field_seen: dict[str, dict[str, float]] = {}
@@ -223,6 +247,21 @@ class TrackStore:
 
             merged = self._merge_locked(current, track)
             self._tracks[merged.icao] = merged
+
+            # One telemetry sample per snapshot, drawn from the merged
+            # values so preserved altitude / speed data continues to
+            # appear on the plot through transient dropouts.
+            telemetry = self._telemetry.setdefault(
+                merged.icao, deque(maxlen=self.telemetry_size)
+            )
+            telemetry.append(
+                TelemetrySample(
+                    timestamp=merged.last_seen,
+                    altitude_ft=merged.altitude_ft,
+                    ground_speed_kt=merged.ground_speed_kt,
+                    vertical_rate_fpm=merged.vertical_rate_fpm,
+                )
+            )
 
             # Only append to history when *this* snapshot actually carried a
             # position. Preserved lat/lon from a previous snapshot has already
@@ -324,6 +363,17 @@ class TrackStore:
                 return ()
             return tuple(entries)
 
+    def telemetry(self, icao: str) -> tuple[TelemetrySample, ...]:
+        """Return a copy of the altitude / speed / vertical-rate history
+        for one aircraft, oldest sample first."""
+
+        key = _normalize_icao(icao)
+        with self._lock:
+            entries = self._telemetry.get(key)
+            if entries is None:
+                return ()
+            return tuple(entries)
+
     def histories(
         self, *, now: float | None = None
     ) -> Mapping[str, tuple[PositionSample, ...]]:
@@ -360,5 +410,6 @@ class TrackStore:
         for icao in stale_icaos:
             expired.append(self._tracks.pop(icao))
             self._histories.pop(icao, None)
+            self._telemetry.pop(icao, None)
             self._field_seen.pop(icao, None)
         return tuple(expired)

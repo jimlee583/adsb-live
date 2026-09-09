@@ -103,10 +103,22 @@ splitter for a three-pane `[graphics, map, table]` layout and mounts an
 dots are colored by altitude, trails are drawn from
 `TrackStore.histories()`, and the outer view snaps to the smallest of a
 fixed set of range rings that contains every visible aircraft. A
-`_SelectionCoordinator` keeps the table's current row and the map's
-highlighted aircraft in sync, using an `_applying` guard to break the
-callback loop. `map_view.py` also exposes pure helpers (`polar_xy`,
-`altitude_color`, `auto_range_nm`) that are testable without Qt.
+`_SelectionCoordinator` keeps the table's current row, the map's
+highlighted aircraft, and the detail pane's plotted history in sync,
+using an `_applying` guard to break the callback loop. `map_view.py`
+also exposes pure helpers (`polar_xy`, `altitude_color`,
+`auto_range_nm`) that are testable without Qt.
+
+Underneath the top row sits a resizable `AircraftDetailWidget` strip
+from `src/adsb_live/aircraft_detail.py`. When an aircraft is selected
+(from the table or by clicking the map) it plots three linked
+time-series curves for that ICAO: altitude, ground speed, and vertical
+rate. The data comes from `TrackStore.telemetry(icao)`, a per-ICAO
+`TelemetrySample` ring buffer that appends one sample per snapshot;
+the widget itself holds no state beyond the currently selected ICAO.
+`aircraft_detail.py` also exposes a Qt-free `telemetry_series` helper
+that reshapes samples into three plot-ready NumPy arrays and skips
+`None` gaps on a per-series basis.
 
 ### Application entry point
 
@@ -228,11 +240,17 @@ than maintaining independent tracking state.
 
 ## 5. Rendering
 
-The window can host up to three panes side-by-side:
+The window can host up to three panes in the top row plus a
+resizable detail strip below:
 
 ```text
 [ spectrum + waterfall ]  [ polar aircraft map ]  [ aircraft table ]
+[ selected aircraft detail (altitude / ground speed / vertical rate) ]
 ```
+
+The top row and detail strip are wired together with a vertical
+`QSplitter` so users can drag the divider up (more waterfall) or down
+(more history plot area).
 
 The spectrum display has two linked PyQtGraph plots:
 
@@ -269,9 +287,10 @@ GitHub Actions with Python 3.12. Coverage:
 - `test_dump1090.py`: `aircraft.json` parsing, HTTP/file readers, and the
   polling source with fixture snapshots.
 - `test_tracks.py`: `AircraftTrack` validation, `TrackStore` upsert,
-  stale-expiry, and field-level merge semantics (partial-snapshot
+  stale-expiry, field-level merge semantics (partial-snapshot
   preservation, per-field aging, position-dropout trail continuity,
-  and `first_seen` collapse across merges).
+  `first_seen` collapse across merges), and per-ICAO `TelemetrySample`
+  ring-buffer semantics.
 - `test_decoder.py`: `Dump1090Process` argv construction, PATH
   resolution, restart accounting, stderr capture, and `LiveDecoder`
   tempdir lifecycle, all driven against a small Python fake instead of
@@ -282,6 +301,14 @@ GitHub Actions with Python 3.12. Coverage:
   `altitude_color` bands, `auto_range_nm` snapping) and an offscreen-Qt
   smoke test that constructs `AircraftMapWidget`, refreshes it against
   an in-memory `TrackStore`, and exercises bidirectional selection.
+- `test_aircraft_detail.py`: pure `telemetry_series` reshape helper
+  (X-axis-shift-to-now behavior and per-series `None`-gap dropping)
+  plus offscreen-Qt smoke tests that construct
+  `AircraftDetailWidget`, seed a `TrackStore` with telemetry, and
+  exercise the selection / empty / missing / switch-selection paths.
+- `test_ui.py`: offscreen `WaterfallWindow` construction paths --
+  decoder with and without receiver coordinates, and that
+  `_SelectionCoordinator` drives the detail pane's `selected_icao`.
 - `test_cli.py`: CLI validation paths (levels, `--decode` compatibility,
   `--lat`/`--lon` pairing) that never import Qt, plus a hint check for
   `--decode` without a receiver.
@@ -381,6 +408,22 @@ instead of accumulating duplicates. A module-level guard
 field is added to `AircraftTrack` without being listed in
 `_MERGEABLE_FIELDS`, preventing silent regressions to snapshot-replace
 semantics for new columns.
+
+### Feature 7: selected-aircraft detail pane — done
+
+`AircraftDetailWidget` in `src/adsb_live/aircraft_detail.py` mounts a
+resizable strip beneath the top row that plots altitude, ground speed,
+and vertical rate for the currently selected aircraft. Data comes from
+`TrackStore.telemetry(icao)`, a per-ICAO `TelemetrySample` ring buffer
+(default `telemetry_size=1200` samples ≈ 20 minutes at 1 Hz) that
+appends one sample per `TrackStore.upsert`. Because the buffer is
+populated from the *merged* track state, plots stay flat through
+transient dropouts instead of introducing spurious gaps. The widget
+itself holds no state beyond the currently selected ICAO -- a
+Qt-free `telemetry_series` helper reshapes samples into three
+plot-ready NumPy arrays and skips `None` gaps per series.
+`_SelectionCoordinator` now routes selections from both the table and
+the map to the detail pane in addition to the map highlight.
 
 ## Parallel development plan
 

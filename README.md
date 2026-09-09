@@ -139,6 +139,24 @@ receiver at the origin, north up, east right, distances in nautical miles.
 Without `--lat`/`--lon` the map is hidden and the status bar shows
 `map=off (needs --lat/--lon)`.
 
+### Selected-aircraft detail pane
+
+Below the top row (waterfall, map, table) sits a resizable strip that
+plots **altitude**, **ground speed**, and **vertical rate** vs. time
+for whichever aircraft is currently selected. Click a row in the
+table or a dot on the map to switch which aircraft is shown; the X
+axes on the three plots are linked so panning stays in sync.
+
+- History depth defaults to about 20 minutes at 1 Hz (controlled by
+  `TrackStore.telemetry_size`, currently a compile-time constant).
+- The header line shows the latest altitude / speed / vertical-rate
+  values plus the total time span currently plotted.
+- Preserved telemetry from field-level merges keeps the plot flat
+  through transient weak-signal dropouts instead of introducing
+  spurious gaps.
+- Drag the horizontal divider up for more waterfall, or down for
+  more plot area.
+
 ## What you should see
 
 - **Top panel** — instantaneous power spectral density (blue) with a slowly
@@ -171,10 +189,11 @@ src/adsb_live/
   spectrum.py            # Hann-windowed FFT -> dB power row
   decoder.py             # dump1090 child-process supervisor + LiveDecoder
   dump1090.py            # aircraft.json parser + polling ingestion thread
-  tracks.py              # AircraftTrack + TrackStore with bounded position history
+  tracks.py              # AircraftTrack + TrackStore (position + telemetry history)
   aircraft_columns.py    # Pure column definitions and row formatters (no Qt)
   map_view.py            # Polar projection + AircraftMapWidget
-  ui.py                  # PyQtGraph window: PSD + waterfall + map + table
+  aircraft_detail.py     # Selected-aircraft altitude/speed/vrate plots
+  ui.py                  # PyQtGraph window: PSD + waterfall + map + table + detail
 ```
 
 ## Roadmap
@@ -182,4 +201,5 @@ src/adsb_live/
 - Real geographic tiles behind the polar map (currently only the polar
   receiver-centered view is implemented)
 - Optional browser dashboard sharing the same reader
-- Selected-aircraft detail pane with altitude/speed history plots
+- Persistent session recording (SQLite) so a session can be replayed
+  and analyzed after the fact

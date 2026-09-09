@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 import pytest
 
 from adsb_live import AircraftTrack, TrackStore
+from adsb_live.tracks import TelemetrySample
 
 
 def test_aircraft_track_is_immutable_and_normalizes_identifiers() -> None:
@@ -480,3 +481,109 @@ def test_module_guard_catches_mergeable_field_drift() -> None:
     assert "icao" not in _MERGEABLE_FIELDS
     assert "last_seen" not in _MERGEABLE_FIELDS
     assert "first_seen" not in _MERGEABLE_FIELDS
+
+
+# --- TelemetrySample buffer (detail-pane feature) --------------------------
+
+
+def test_telemetry_records_one_sample_per_upsert() -> None:
+    store = TrackStore(stale_after_s=600.0, clock=lambda: 200.0)
+    store.upsert(
+        AircraftTrack(
+            icao="A12345",
+            last_seen=100.0,
+            altitude_ft=30_000.0,
+            ground_speed_kt=420.0,
+            vertical_rate_fpm=0.0,
+        )
+    )
+    store.upsert(
+        AircraftTrack(
+            icao="A12345",
+            last_seen=101.0,
+            altitude_ft=30_050.0,
+            ground_speed_kt=421.0,
+            vertical_rate_fpm=32.0,
+        )
+    )
+
+    samples = store.telemetry("A12345")
+    assert len(samples) == 2
+    assert samples[0] == TelemetrySample(
+        timestamp=100.0,
+        altitude_ft=30_000.0,
+        ground_speed_kt=420.0,
+        vertical_rate_fpm=0.0,
+    )
+    assert samples[1] == TelemetrySample(
+        timestamp=101.0,
+        altitude_ft=30_050.0,
+        ground_speed_kt=421.0,
+        vertical_rate_fpm=32.0,
+    )
+
+
+def test_telemetry_uses_merged_values_through_transient_dropouts() -> None:
+    """Preserved (merged) altitude / speed should keep the plot flat
+    instead of introducing spurious ``None`` gaps."""
+
+    store = TrackStore(
+        stale_after_s=600.0, field_stale_after_s=30.0, clock=lambda: 200.0
+    )
+    store.upsert(
+        AircraftTrack(
+            icao="A12345",
+            last_seen=100.0,
+            altitude_ft=30_000.0,
+            ground_speed_kt=420.0,
+        )
+    )
+    # Snapshot with no numeric telemetry -- merge preserves both.
+    store.upsert(AircraftTrack(icao="A12345", last_seen=101.0))
+
+    samples = store.telemetry("A12345")
+    assert len(samples) == 2
+    assert samples[1].altitude_ft == 30_000.0
+    assert samples[1].ground_speed_kt == 420.0
+
+
+def test_telemetry_is_bounded_by_telemetry_size() -> None:
+    store = TrackStore(
+        stale_after_s=600.0, telemetry_size=3, clock=lambda: 200.0
+    )
+    for i in range(6):
+        store.upsert(
+            AircraftTrack(
+                icao="A12345", last_seen=float(i), altitude_ft=30_000.0 + i
+            )
+        )
+
+    samples = store.telemetry("A12345")
+    assert len(samples) == 3
+    assert [round(s.altitude_ft, 3) for s in samples] == [30_003.0, 30_004.0, 30_005.0]
+
+
+def test_telemetry_cleared_when_track_expires() -> None:
+    now = {"value": 100.0}
+    store = TrackStore(stale_after_s=10.0, clock=lambda: now["value"])
+    store.upsert(
+        AircraftTrack(icao="A12345", last_seen=100.0, altitude_ft=30_000.0)
+    )
+    assert store.telemetry("A12345")
+
+    now["value"] = 200.0
+    store.snapshot()
+
+    assert store.telemetry("A12345") == ()
+
+
+def test_telemetry_returns_empty_tuple_for_unknown_icao() -> None:
+    store = TrackStore()
+    assert store.telemetry("BEEF00") == ()
+
+
+def test_track_store_rejects_non_positive_telemetry_size() -> None:
+    with pytest.raises(ValueError, match="telemetry_size must be positive"):
+        TrackStore(telemetry_size=0)
+    with pytest.raises(ValueError, match="telemetry_size must be positive"):
+        TrackStore(telemetry_size=-1)

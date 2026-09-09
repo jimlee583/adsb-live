@@ -10,6 +10,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 
 from .aircraft_columns import Column, RowContext, build_columns
+from .aircraft_detail import AircraftDetailWidget
 from .decoder import LiveDecoder
 from .map_view import AircraftMapWidget
 from .sdr import DropOldestQueue, _BaseSource
@@ -24,12 +25,14 @@ CALIBRATION_HOPS = 400
 
 
 class _SelectionCoordinator(QtCore.QObject):
-    """Keep the aircraft table and the map showing the same selected ICAO.
+    """Keep the aircraft table, map, and detail pane showing the same
+    selected ICAO.
 
     Signals travel in both directions:
 
-    * Table row selected --> resolve ICAO from column 0 --> map highlight.
-    * Map click --> table row selection --> table sync.
+    * Table row selected --> resolve ICAO from column 0 --> map highlight
+      + detail-pane switch.
+    * Map click --> table row selection + detail-pane switch.
 
     The ``_applying`` guard breaks the loop so a programmatic change on
     one side does not bounce back into the other.
@@ -42,12 +45,14 @@ class _SelectionCoordinator(QtCore.QObject):
         proxy: QtCore.QSortFilterProxyModel,
         model: "AircraftTableModel",
         map_widget: Optional[AircraftMapWidget],
+        detail_widget: Optional[AircraftDetailWidget] = None,
     ) -> None:
         super().__init__(view)
         self._view = view
         self._proxy = proxy
         self._model = model
         self._map = map_widget
+        self._detail = detail_widget
         self._applying = False
         view.selectionModel().currentRowChanged.connect(self._on_row_changed)
         if map_widget is not None:
@@ -56,12 +61,15 @@ class _SelectionCoordinator(QtCore.QObject):
     def _on_row_changed(
         self, current: QtCore.QModelIndex, _previous: QtCore.QModelIndex
     ) -> None:
-        if self._applying or self._map is None:
+        if self._applying:
             return
         icao = self._icao_from_proxy_index(current)
         self._applying = True
         try:
-            self._map.set_selected_icao(icao)
+            if self._map is not None:
+                self._map.set_selected_icao(icao)
+            if self._detail is not None:
+                self._detail.set_selected_icao(icao)
         finally:
             self._applying = False
 
@@ -72,14 +80,20 @@ class _SelectionCoordinator(QtCore.QObject):
         try:
             if not icao:
                 self._view.clearSelection()
+                if self._detail is not None:
+                    self._detail.set_selected_icao(None)
                 return
             row = self._find_row_for_icao(icao)
             if row is None:
                 self._view.clearSelection()
+                if self._detail is not None:
+                    self._detail.set_selected_icao(None)
                 return
             proxy_index = self._proxy.index(row, 0)
             self._view.setCurrentIndex(proxy_index)
             self._view.selectRow(row)
+            if self._detail is not None:
+                self._detail.set_selected_icao(icao)
         finally:
             self._applying = False
 
@@ -239,9 +253,10 @@ class WaterfallWindow(QtWidgets.QMainWindow):
         self._aircraft_count = 0
         # Primed before the status label is built so ``_status_text`` /
         # ``_decoder_status_text`` can safely read it during construction.
-        # Replaced with an ``AircraftMapWidget`` further down when the
-        # decoder is present *and* a receiver lat/lon is configured.
+        # Replaced with concrete widgets further down when the decoder
+        # is present (and, for the map, a receiver lat/lon is configured).
         self._aircraft_map: AircraftMapWidget | None = None
+        self._aircraft_detail: AircraftDetailWidget | None = None
 
         # How many FFT hops max-fold into one displayed waterfall row.
         hop_rate = 1.0 / self._hop_period_s
@@ -332,31 +347,47 @@ class WaterfallWindow(QtWidgets.QMainWindow):
                 QtGui.QFont("Menlo", 11)
             )
 
-            splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-            splitter.addWidget(self._graphics)
+            top_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+            top_splitter.addWidget(self._graphics)
             if receiver is not None:
                 self._aircraft_map = AircraftMapWidget(
                     store=self._decoder.store,
                     receiver=receiver,
                     parent=self,
                 )
-                splitter.addWidget(self._aircraft_map)
-            splitter.addWidget(self._aircraft_view)
+                top_splitter.addWidget(self._aircraft_map)
+            top_splitter.addWidget(self._aircraft_view)
             if self._aircraft_map is not None:
-                splitter.setStretchFactor(0, 3)
-                splitter.setStretchFactor(1, 2)
-                splitter.setStretchFactor(2, 2)
+                top_splitter.setStretchFactor(0, 3)
+                top_splitter.setStretchFactor(1, 2)
+                top_splitter.setStretchFactor(2, 2)
             else:
-                splitter.setStretchFactor(0, 3)
-                splitter.setStretchFactor(1, 2)
-            splitter.setChildrenCollapsible(False)
-            vbox.addWidget(splitter, stretch=1)
+                top_splitter.setStretchFactor(0, 3)
+                top_splitter.setStretchFactor(1, 2)
+            top_splitter.setChildrenCollapsible(False)
+
+            # Selected-aircraft detail pane sits as a resizable strip
+            # underneath everything else so users can drag it up when
+            # they want more plot area, or shrink it away when they
+            # want the waterfall taller.
+            self._aircraft_detail = AircraftDetailWidget(
+                store=self._decoder.store, parent=self
+            )
+
+            main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+            main_splitter.addWidget(top_splitter)
+            main_splitter.addWidget(self._aircraft_detail)
+            main_splitter.setStretchFactor(0, 4)
+            main_splitter.setStretchFactor(1, 1)
+            main_splitter.setChildrenCollapsible(False)
+            vbox.addWidget(main_splitter, stretch=1)
 
             self._selection_coordinator = _SelectionCoordinator(
                 view=self._aircraft_view,
                 proxy=self._aircraft_proxy,
                 model=self._aircraft_model,
                 map_widget=self._aircraft_map,
+                detail_widget=self._aircraft_detail,
             )
 
             self._table_timer = QtCore.QTimer(self)
@@ -369,6 +400,7 @@ class WaterfallWindow(QtWidgets.QMainWindow):
             self._aircraft_proxy = None
             self._aircraft_view = None
             self._aircraft_map = None
+            self._aircraft_detail = None
             self._selection_coordinator = None
             vbox.addWidget(self._graphics, stretch=1)
 
@@ -541,6 +573,8 @@ class WaterfallWindow(QtWidgets.QMainWindow):
         self._aircraft_count = self._aircraft_model.refresh()
         if self._aircraft_map is not None:
             self._aircraft_map.refresh()
+        if self._aircraft_detail is not None:
+            self._aircraft_detail.refresh()
         self._maybe_update_status(force=True)
 
     def _apply_levels(self, vmin: float, vmax: float) -> None:
