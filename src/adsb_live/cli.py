@@ -5,10 +5,17 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
+from pathlib import Path
 from typing import Sequence
 
+from . import __version__
 from .decoder import Dump1090BinaryError, LiveDecoder
 from .sdr import DemoSource, DropOldestByteQueue, DropOldestQueue, RtlSdrSource
+from .session import (
+    ReplaySource,
+    SessionFileError,
+    SessionRecorder,
+)
 
 
 def _parse_gain(value: str) -> object:
@@ -212,6 +219,27 @@ def _build_parser() -> argparse.ArgumentParser:
             "(default: 1.0)."
         ),
     )
+    parser.add_argument(
+        "--record",
+        type=Path,
+        default=None,
+        help=(
+            "Record decoded aircraft snapshots to the given SQLite file. "
+            "Requires --decode. Refuses to overwrite an existing file. "
+            "Replay later with --replay PATH."
+        ),
+    )
+    parser.add_argument(
+        "--replay",
+        type=Path,
+        default=None,
+        help=(
+            "Replay a previously recorded session file. Incompatible with "
+            "--decode/--record/--demo. Uses synthetic RF for the waterfall; "
+            "aircraft data comes entirely from the file. --lat/--lon override "
+            "the receiver location stored in the file."
+        ),
+    )
     return parser
 
 
@@ -244,6 +272,49 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (args.lat is None) != (args.lon is None):
         print("--lat and --lon must be provided together.", file=sys.stderr)
         return 2
+
+    if args.replay is not None:
+        if args.decode:
+            print(
+                "--replay is incompatible with --decode "
+                "(replay drives the aircraft views from the recorded file).",
+                file=sys.stderr,
+            )
+            return 2
+        if args.record is not None:
+            print(
+                "--replay is incompatible with --record.",
+                file=sys.stderr,
+            )
+            return 2
+        if args.demo:
+            print(
+                "--replay already uses a synthetic RF source; "
+                "--demo is redundant and cannot be combined with it.",
+                file=sys.stderr,
+            )
+            return 2
+
+    if args.record is not None:
+        if args.replay is not None:
+            print(
+                "--record is incompatible with --replay.",
+                file=sys.stderr,
+            )
+            return 2
+        if not args.decode:
+            print(
+                "--record requires --decode "
+                "(there is nothing to record without live decoding).",
+                file=sys.stderr,
+            )
+            return 2
+        if args.record.exists():
+            print(
+                f"--record refuses to overwrite existing file: {args.record}",
+                file=sys.stderr,
+            )
+            return 2
 
     if args.decode:
         if args.demo:
@@ -280,9 +351,41 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     rows_queue = DropOldestQueue(maxsize=512)
 
-    decoder: LiveDecoder | None = None
+    decoder: LiveDecoder | ReplaySource | None = None
     iq_sink: DropOldestByteQueue | None = None
+    recorder: SessionRecorder | None = None
+
+    if args.replay is not None:
+        try:
+            decoder = ReplaySource(
+                args.replay,
+                receiver_lat_override=args.lat,
+                receiver_lon_override=args.lon,
+            )
+        except SessionFileError as exc:
+            print(f"failed to open replay file: {exc}", file=sys.stderr)
+            return 2
+
     if args.decode:
+        if args.record is not None:
+            try:
+                recorder = SessionRecorder(
+                    args.record,
+                    receiver_lat=args.lat,
+                    receiver_lon=args.lon,
+                    stale_after_s=args.stale_after,
+                    poll_interval_s=args.decode_poll_interval,
+                    app_version=__version__,
+                )
+            except FileExistsError as exc:
+                print(str(exc), file=sys.stderr)
+                return 2
+            except OSError as exc:
+                print(
+                    f"failed to open record file {args.record}: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
         try:
             decoder = LiveDecoder(
                 binary_path=args.dump1090_path,
@@ -290,13 +393,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 receiver_lon=args.lon,
                 poll_interval_s=args.decode_poll_interval,
                 stale_after_s=args.stale_after,
+                on_poll=(
+                    (lambda store, r=recorder: r.write_snapshot(store.snapshot()))
+                    if recorder is not None
+                    else None
+                ),
             )
         except Dump1090BinaryError as exc:
             print(f"{exc}", file=sys.stderr)
+            if recorder is not None:
+                recorder.close()
+                try:
+                    args.record.unlink()
+                except OSError:  # pragma: no cover - best effort cleanup
+                    pass
             return 2
         iq_sink = decoder.iq_sink
 
-    if args.demo:
+    # Waterfall source. Replay mode always uses the demo source so the
+    # spectrum panel keeps scrolling while aircraft data comes from the file.
+    if args.demo or args.replay is not None:
         source = DemoSource(
             center_freq=args.freq,
             sample_rate=args.rate,
@@ -342,6 +458,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             decoder.stop()
         source.stop()
         source.join(timeout=2.0)
+        if recorder is not None:
+            recorder.close()
     return int(exit_code)
 
 

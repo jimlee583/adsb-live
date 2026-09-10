@@ -121,6 +121,57 @@ def test_waterfall_window_builds_with_decoder_without_receiver(qt_app) -> None:
         window.close()
 
 
+def test_waterfall_window_builds_with_replay_source(qt_app, tmp_path) -> None:
+    """--replay path: WaterfallWindow shows a ``replay=`` status and hosts the
+    aircraft views driven by the recorded ``TrackStore``."""
+
+    from adsb_live import (
+        AircraftTrack,
+        ReplaySource,
+        SessionRecorder,
+    )
+    from adsb_live.aircraft_detail import AircraftDetailWidget
+    from adsb_live.map_view import AircraftMapWidget
+    from adsb_live.ui import WaterfallWindow
+
+    session_path = tmp_path / "session.db"
+    recorder = SessionRecorder(
+        session_path,
+        receiver_lat=40.015,
+        receiver_lon=-105.2705,
+        stale_after_s=60.0,
+        poll_interval_s=1.0,
+        app_version="test",
+        clock=lambda: 100.0,
+        wall_clock=lambda: 0.0,
+    )
+    recorder.write_snapshot((
+        AircraftTrack(
+            icao="A12345",
+            last_seen=100.5,
+            callsign="TEST",
+            latitude=40.02,
+            longitude=-105.25,
+            altitude_ft=30_000.0,
+        ),
+    ))
+    recorder.close()
+
+    source = _make_source()
+    replay = ReplaySource(session_path)  # not started -- pure construction test
+    window = WaterfallWindow(source=source, rows=source.rows, decoder=replay)
+    try:
+        assert isinstance(window._aircraft_map, AircraftMapWidget)
+        assert isinstance(window._aircraft_detail, AircraftDetailWidget)
+        status = window._status_text(rows_per_sec=0.0)
+        assert "replay=" in status
+        assert "session.db" in status
+        assert "map=off" not in status
+    finally:
+        window.close()
+        replay.stop()
+
+
 def test_waterfall_window_detail_pane_reflects_selection(qt_app) -> None:
     """Selecting an aircraft via the coordinator drives the detail pane."""
     from adsb_live.tracks import AircraftTrack

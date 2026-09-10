@@ -78,6 +78,8 @@ All flags:
 | `--lat` / `--lon` | none | Receiver location for range/bearing and surface positions |
 | `--stale-after` | `60.0` | Drop tracks idle for this many seconds |
 | `--decode-poll-interval` | `1.0` | Seconds between `aircraft.json` re-reads |
+| `--record` | off | Save decoded aircraft snapshots to a SQLite session file (requires `--decode`) |
+| `--replay` | off | Replay a previously recorded session file; drives the aircraft views without a dongle or `dump1090` |
 
 > `--gain max` (the default) picks the highest supported tuner gain (typically
 > 49.6 dB on an R820T2). This is what FlightAware recommends for ADS-B. The
@@ -157,6 +159,38 @@ axes on the three plots are linked so panning stays in sync.
 - Drag the horizontal divider up for more waterfall, or down for
   more plot area.
 
+## Recording and replaying sessions
+
+Pass `--record PATH` alongside `--decode` to save every decoded aircraft
+snapshot into a SQLite file (~1 Hz, whatever `--decode-poll-interval`
+is). Later, replay it without the dongle or `dump1090`:
+
+```bash
+# Live: record while you fly the app.
+uv run adsb-live --decode --lat 40.0150 --lon -105.2705 \
+    --record ~/adsb-sessions/2026-09-09.db
+
+# Replay: no hardware required. Aircraft table, map, and detail pane
+# come back with the tracks, trails, and telemetry you recorded.
+uv run adsb-live --replay ~/adsb-sessions/2026-09-09.db
+```
+
+Notes:
+
+- `--record` refuses to overwrite an existing file.
+- `--record` requires `--decode`; there is nothing to record without live
+  decoding.
+- `--replay` is incompatible with `--decode`, `--record`, and `--demo`.
+- Replay uses a synthetic RF source for the spectrum panel so the
+  waterfall keeps scrolling. Aircraft data comes entirely from the file.
+- Receiver coordinates are read from the session metadata. Pass
+  `--lat`/`--lon` to override (useful when replaying a recording that was
+  made without a fixed location).
+- After the last snapshot plays, replay freezes on the final aircraft
+  state and re-applies it with fresh timestamps so the window keeps
+  showing tracks while you look at them. The status bar switches from
+  `replay=... (playing)` to `replay=... (done)`.
+
 ## What you should see
 
 - **Top panel** — instantaneous power spectral density (blue) with a slowly
@@ -190,6 +224,7 @@ src/adsb_live/
   decoder.py             # dump1090 child-process supervisor + LiveDecoder
   dump1090.py            # aircraft.json parser + polling ingestion thread
   tracks.py              # AircraftTrack + TrackStore (position + telemetry history)
+  session.py             # SQLite SessionRecorder + ReplaySource (record / replay)
   aircraft_columns.py    # Pure column definitions and row formatters (no Qt)
   map_view.py            # Polar projection + AircraftMapWidget
   aircraft_detail.py     # Selected-aircraft altitude/speed/vrate plots
@@ -201,5 +236,5 @@ src/adsb_live/
 - Real geographic tiles behind the polar map (currently only the polar
   receiver-centered view is implemented)
 - Optional browser dashboard sharing the same reader
-- Persistent session recording (SQLite) so a session can be replayed
-  and analyzed after the fact
+- Post-hoc analysis tools that read the SQLite session format directly
+  (density plots, callsign heatmaps, per-day reports)

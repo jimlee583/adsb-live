@@ -16,6 +16,16 @@ from .dump1090 import (
     parse_aircraft_json,
 )
 from .sdr import DropOldestByteQueue, DropOldestQueue
+from .session import (
+    RecordedSnapshot,
+    ReplayHealth,
+    ReplaySource,
+    SessionFileError,
+    SessionMetadata,
+    SessionRecorder,
+    load_snapshots,
+    read_metadata,
+)
 from .tracks import AircraftTrack, PositionSample, TelemetrySample, TrackStore
 
 __all__ = [
@@ -33,10 +43,18 @@ __all__ = [
     "HttpSnapshotReader",
     "LiveDecoder",
     "PositionSample",
+    "RecordedSnapshot",
+    "ReplayHealth",
+    "ReplaySource",
+    "SessionFileError",
+    "SessionMetadata",
+    "SessionRecorder",
     "TelemetrySample",
     "TrackStore",
     "__version__",
+    "load_snapshots",
     "parse_aircraft_json",
+    "read_metadata",
 ]
 
 __version__ = "0.1.0"

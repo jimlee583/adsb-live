@@ -126,3 +126,79 @@ def test_parse_latitude_rejects_out_of_range(value: str) -> None:
 def test_parse_longitude_rejects_out_of_range(value: str) -> None:
     with pytest.raises((argparse.ArgumentTypeError, ValueError)):
         cli._parse_longitude(value)
+
+
+# -----------------------------------------------------------------------------
+# --record / --replay validation. All paths must return 2 without importing Qt.
+# -----------------------------------------------------------------------------
+
+
+def test_main_rejects_record_without_decode(
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = cli.main(["--record", str(tmp_path / "s.db")])
+    assert exit_code == 2
+    assert "--record requires --decode" in capsys.readouterr().err
+
+
+def test_main_rejects_record_with_existing_path(
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "existing.db"
+    path.write_bytes(b"already here")
+    exit_code = cli.main(["--decode", "--record", str(path)])
+    assert exit_code == 2
+    assert "refuses to overwrite" in capsys.readouterr().err
+
+
+def test_main_rejects_record_with_replay(
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    existing = tmp_path / "replay.db"
+    existing.write_bytes(b"stub")
+    exit_code = cli.main([
+        "--replay", str(existing),
+        "--record", str(tmp_path / "out.db"),
+    ])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    # Either the --replay-vs-record check or the --record-vs-replay check
+    # will trip first, both are correct rejections.
+    assert (
+        "--replay is incompatible with --record" in err
+        or "--record is incompatible with --replay" in err
+    )
+
+
+def test_main_rejects_replay_with_decode(
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = cli.main(["--replay", str(tmp_path / "x.db"), "--decode"])
+    assert exit_code == 2
+    assert "--replay is incompatible with --decode" in capsys.readouterr().err
+
+
+def test_main_rejects_replay_with_demo(
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = cli.main(["--replay", str(tmp_path / "x.db"), "--demo"])
+    assert exit_code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+
+
+def test_main_reports_missing_replay_file(
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    exit_code = cli.main(["--replay", str(tmp_path / "missing.db")])
+    assert exit_code == 2
+    assert "failed to open replay file" in capsys.readouterr().err

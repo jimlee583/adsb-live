@@ -379,7 +379,12 @@ class LiveDecoder:
     the ``store`` to the UI table. ``start()`` and ``stop()`` bring the
     child process and the poller up and down in the right order and clean
     up the temporary ``aircraft.json`` directory.
+
+    ``kind = "decode"`` disambiguates this class from :class:`ReplaySource`
+    when the UI status bar wants to distinguish live decoding from playback.
     """
+
+    kind = "decode"
 
     def __init__(
         self,
@@ -394,6 +399,7 @@ class LiveDecoder:
         iq_sink_maxsize: int = 64,
         stale_after_s: float = 60.0,
         output_dir: Path | None = None,
+        on_poll: Callable[[TrackStore], None] | None = None,
     ) -> None:
         self.store = store if store is not None else TrackStore(
             stale_after_s=stale_after_s
@@ -423,6 +429,7 @@ class LiveDecoder:
             reader=FileSnapshotReader(self.output_dir / "aircraft.json"),
             store=self.store,
             poll_interval_s=poll_interval_s,
+            on_poll=on_poll,
         )
         self._started = False
         self._stopped = False

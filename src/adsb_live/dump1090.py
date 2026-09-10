@@ -235,6 +235,7 @@ class Dump1090JsonSource(threading.Thread):
         store: TrackStore,
         poll_interval_s: float = 1.0,
         clock: Callable[[], float] = time.monotonic,
+        on_poll: Callable[[TrackStore], None] | None = None,
     ) -> None:
         if not math.isfinite(poll_interval_s) or poll_interval_s <= 0.0:
             raise ValueError("poll_interval_s must be positive and finite")
@@ -243,6 +244,12 @@ class Dump1090JsonSource(threading.Thread):
         self.store = store
         self.poll_interval_s = float(poll_interval_s)
         self._clock = clock
+        #: Optional hook fired after each successful ``poll_once`` (after the
+        #: incoming snapshot has been upserted and expired). Used by the
+        #: session recorder to persist ``store.snapshot()`` at exactly the
+        #: cadence the UI sees. Exceptions from the hook are swallowed so a
+        #: broken sink cannot kill the poller thread.
+        self._on_poll = on_poll
         self._stop_event = threading.Event()
         self._health_lock = threading.Lock()
         self._health = Dump1090SourceHealth()
@@ -304,6 +311,14 @@ class Dump1090JsonSource(threading.Thread):
                 ),
                 last_message_count=snapshot.message_count,
             )
+
+        if self._on_poll is not None:
+            try:
+                self._on_poll(self.store)
+            except Exception:  # noqa: BLE001 -- never let a sink kill the poll thread
+                # The hook is a passive observer (session recording, etc.).
+                # Its failures must not stop live decoding.
+                pass
         return snapshot
 
     def run(self) -> None:

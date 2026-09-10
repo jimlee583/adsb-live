@@ -27,8 +27,10 @@ At runtime, the application:
   position history maintained by `TrackStore`.
 
 The application currently has no external geographic map tiles and no
-network API. Aircraft state (including trails) is held only in the
-in-memory `TrackStore`.
+network API. Live aircraft state (including trails and telemetry) lives
+in the in-memory `TrackStore`; when the CLI is passed `--record`, each
+successful poll is also appended to a SQLite session file for later
+`--replay`.
 
 ## 2. Architecture
 
@@ -310,8 +312,15 @@ GitHub Actions with Python 3.12. Coverage:
   decoder with and without receiver coordinates, and that
   `_SelectionCoordinator` drives the detail pane's `selected_icao`.
 - `test_cli.py`: CLI validation paths (levels, `--decode` compatibility,
-  `--lat`/`--lon` pairing) that never import Qt, plus a hint check for
-  `--decode` without a receiver.
+  `--lat`/`--lon` pairing, and the `--record` / `--replay` mutual
+  exclusions) that never import Qt, plus a hint check for `--decode`
+  without a receiver.
+- `test_session.py`: `SessionRecorder` schema and JSON round-trip, the
+  ``Dump1090JsonSource.on_poll`` hook (called on success, skipped on
+  parse failure, and safe against a raising sink), and `ReplaySource`
+  end-to-end -- timestamp rebase onto a fresh monotonic clock, freeze
+  behavior after the final snapshot, receiver override, and health
+  reporting.
 
 Qt smoke tests can run with an offscreen platform and the demo source but
 are not part of the CI suite today. Tests that require an actual RTL-SDR
@@ -424,6 +433,34 @@ Qt-free `telemetry_series` helper reshapes samples into three
 plot-ready NumPy arrays and skips `None` gaps per series.
 `_SelectionCoordinator` now routes selections from both the table and
 the map to the detail pane in addition to the map highlight.
+
+### Feature 8: session recording and replay — done
+
+`src/adsb_live/session.py` adds a stdlib-only SQLite session format,
+`SessionRecorder`, and `ReplaySource`. The CLI grows two flags:
+
+- `--record PATH` (requires `--decode`): after each successful
+  `Dump1090JsonSource.poll_once`, the recorder appends
+  `store.snapshot()` to a SQLite file. Each row stores
+  ``elapsed_s`` (monotonic offset from recorder start) and a JSON
+  array of the merged tracks; timestamps are persisted as offsets so
+  they can be remapped onto a fresh monotonic clock during replay.
+  Refuses to overwrite an existing file.
+- `--replay PATH`: opens the file and constructs a `ReplaySource` that
+  duck-types `LiveDecoder` for `WaterfallWindow` (same `store`,
+  `process`, `poller`, `iq_sink`, and `stop()` surface). A background
+  thread waits according to each snapshot's ``elapsed_s`` and upserts
+  it into a fresh `TrackStore`, so the table, map, trails, telemetry,
+  and detail pane all reproduce the recorded state. After the final
+  snapshot the source re-applies it at a slow cadence with freshened
+  ``last_seen`` values so tracks do not expire while the window is
+  still open. Replay uses `DemoSource` for the RF panel; `--lat`/`--lon`
+  override the recorded receiver location.
+
+The recording hook enters through a new optional
+``on_poll: Callable[[TrackStore], None]`` parameter on
+`Dump1090JsonSource`; hook errors are swallowed so a broken sink cannot
+kill live decoding.
 
 ## Parallel development plan
 

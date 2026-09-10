@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import numpy as np
 import pyqtgraph as pg
@@ -15,6 +15,13 @@ from .decoder import LiveDecoder
 from .map_view import AircraftMapWidget
 from .sdr import DropOldestQueue, _BaseSource
 from .tracks import AircraftTrack, TrackStore
+
+if TYPE_CHECKING:
+    from .session import ReplaySource
+
+    DecoderLike = Union[LiveDecoder, ReplaySource]
+else:  # pragma: no cover - runtime alias only
+    DecoderLike = object
 
 
 # Starting range for the color scale before auto-calibration kicks in.
@@ -238,7 +245,7 @@ class WaterfallWindow(QtWidgets.QMainWindow):
         refresh_ms: int = 33,
         levels_db: Optional[tuple[float, float]] = None,
         time_window_s: float = 5.0,
-        decoder: Optional[LiveDecoder] = None,
+        decoder: Optional["DecoderLike"] = None,
         table_refresh_ms: int = 1000,
     ) -> None:
         super().__init__()
@@ -522,6 +529,13 @@ class WaterfallWindow(QtWidgets.QMainWindow):
     def _decoder_status_text(self) -> str:
         decoder = self._decoder
         assert decoder is not None
+        if getattr(decoder, "kind", "decode") == "replay":
+            return self._replay_status_text()
+        return self._live_decoder_status_text()
+
+    def _live_decoder_status_text(self) -> str:
+        decoder = self._decoder
+        assert decoder is not None
         proc_health = decoder.process.health
         poll_health = decoder.poller.health
         proc_state = "running" if proc_health.running else "stopped"
@@ -565,6 +579,32 @@ class WaterfallWindow(QtWidgets.QMainWindow):
             f"positions={positions}   messages={messages_str}   "
             f"snapshots={poll_health.snapshots_processed}   "
             f"stdin={bytes_str}   sink-drops={dropped}{map_note}{err_tail}"
+        )
+
+    def _replay_status_text(self) -> str:
+        decoder = self._decoder
+        assert decoder is not None
+        health = decoder.health
+        positions = sum(
+            1
+            for t in decoder.store.snapshot()
+            if t.latitude is not None and t.longitude is not None
+        )
+        path = getattr(decoder, "path", None)
+        path_str = path.name if path is not None else "?"
+        state = "done" if health.done else "playing"
+        map_note = (
+            "" if self._aircraft_map is not None else "   map=off (needs --lat/--lon)"
+        )
+        err_tail = (
+            f"   err={health.last_error}" if health.last_error else ""
+        )
+        return (
+            f"replay={path_str} ({state})   "
+            f"t={health.elapsed_s:.1f}/{health.duration_s:.1f}s   "
+            f"snapshots={health.snapshots_processed}/{health.snapshots_total}   "
+            f"aircraft={self._aircraft_count}   positions={positions}"
+            f"{map_note}{err_tail}"
         )
 
     def _on_table_tick(self) -> None:
