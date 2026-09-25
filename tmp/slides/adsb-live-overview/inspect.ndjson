@@ -1,0 +1,24 @@
+{"kind":"deck","id":"adsb-live-overview","slideCount":1,"slideSize":{"width":1280,"height":720}}
+{"kind":"slide","slide":1,"id":"0l7150"}
+{"kind":"image","slide":1,"id":"2","role":"art plate","path":"/Users/jimlee/Projects/adsb-live/tmp/slides/pro-reference-images/slide-01.png","bbox":[0,0,1280,720]}
+{"kind":"shape","slide":1,"id":"3","role":"left contrast overlay","shapeType":"rect","bbox":[0,0,508,720]}
+{"kind":"shape","slide":1,"id":"4","role":"cover accent rule","shapeType":"rect","bbox":[48,88,6,542]}
+{"kind":"textbox","slide":1,"id":"5","role":"kicker","text":"DESKTOP RF TOOL","textPreview":"DESKTOP RF TOOL","textChars":15,"textLines":1,"bbox":[70,88,410,22]}
+{"kind":"textbox","slide":1,"id":"6","role":"cover title","text":"adsb-live","textPreview":"adsb-live","textChars":9,"textLines":1,"bbox":[68,118,420,58]}
+{"kind":"textbox","slide":1,"id":"7","role":"cover subtitle","text":"Watch live 1090 MHz ADS-B spectrum from an\nRTL-SDR, then decode the aircraft.","textPreview":"Watch live 1090 MHz ADS-B spectrum from an | RTL-SDR, then decode the aircraft.","textChars":77,"textLines":2,"bbox":[70,184,410,48]}
+{"kind":"shape","slide":1,"id":"8","role":"feature panel: SPECTRUM","shapeType":"roundRect","bbox":[70,248,410,110]}
+{"kind":"shape","slide":1,"id":"9","role":"feature accent: SPECTRUM","shapeType":"rect","bbox":[70,248,5,110]}
+{"kind":"textbox","slide":1,"id":"10","role":"feature label","text":"SPECTRUM","textPreview":"SPECTRUM","textChars":8,"textLines":1,"bbox":[88,262,378,20]}
+{"kind":"textbox","slide":1,"id":"11","role":"feature body: SPECTRUM","text":"Live PSD and a max-hold waterfall —\nverify antenna, gain, and RF.","textPreview":"Live PSD and a max-hold waterfall — | verify antenna, gain, and RF.","textChars":65,"textLines":2,"bbox":[88,288,378,52]}
+{"kind":"shape","slide":1,"id":"12","role":"feature panel: DECODE","shapeType":"roundRect","bbox":[70,384,410,110]}
+{"kind":"shape","slide":1,"id":"13","role":"feature accent: DECODE","shapeType":"rect","bbox":[70,384,5,110]}
+{"kind":"textbox","slide":1,"id":"14","role":"feature label","text":"DECODE","textPreview":"DECODE","textChars":6,"textLines":1,"bbox":[88,398,378,20]}
+{"kind":"textbox","slide":1,"id":"15","role":"feature body: DECODE","text":"Feed the same live signal into\ndump1090 for a table, polar map, and\ntelemetry.","textPreview":"Feed the same live signal into | dump1090 for a table, polar map, and | telemetry.","textChars":78,"textLines":3,"bbox":[88,424,378,52]}
+{"kind":"shape","slide":1,"id":"16","role":"feature panel: RECORD / REPLAY","shapeType":"roundRect","bbox":[70,520,410,110]}
+{"kind":"shape","slide":1,"id":"17","role":"feature accent: RECORD / REPLAY","shapeType":"rect","bbox":[70,520,5,110]}
+{"kind":"textbox","slide":1,"id":"18","role":"feature label","text":"RECORD / REPLAY","textPreview":"RECORD / REPLAY","textChars":15,"textLines":1,"bbox":[88,534,378,20]}
+{"kind":"textbox","slide":1,"id":"19","role":"feature body: RECORD / REPLAY","text":"Save SQLite snapshots and replay later\nwithout a dongle.","textPreview":"Save SQLite snapshots and replay later | without a dongle.","textChars":56,"textLines":2,"bbox":[88,560,378,52]}
+{"kind":"shape","slide":1,"id":"20","role":"screenshot frame","shapeType":"roundRect","bbox":[522,90,708,422]}
+{"kind":"image","slide":1,"id":"21","role":"app screenshot","path":"/Users/jimlee/Projects/adsb-live/tmp/slides/adsb-live-overview/app-screenshot.png","bbox":[528,96,696,410]}
+{"kind":"textbox","slide":1,"id":"22","role":"screenshot caption","text":"Demo window: power spectrum on top, 5-second waterfall below.","textPreview":"Demo window: power spectrum on top, 5-second waterfall below.","textChars":61,"textLines":1,"bbox":[528,522,696,22]}
+{"kind":"textbox","slide":1,"id":"23","role":"footer","text":"Local desktop app for macOS, Linux, and Windows","textPreview":"Local desktop app for macOS, Linux, and Windows","textChars":47,"textLines":1,"bbox":[70,656,410,22]}

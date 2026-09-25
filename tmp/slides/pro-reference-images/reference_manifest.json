@@ -1,0 +1,24 @@
+{
+  "reference_dir": "/Users/jimlee/Projects/adsb-live/tmp/slides/pro-reference-images",
+  "deck_size": {
+    "width": 1280,
+    "height": 720
+  },
+  "generation_mode": "platform-native-imagegen",
+  "instructions": [
+    "Use the platform-native imagegen tool once per prompt.",
+    "Do not display generated images in chat unless the user explicitly asks to review them.",
+    "Generate slide 1 first as the visual style setter.",
+    "For slides 2..N, use slide 1 as a style reference when the platform supports image context.",
+    "Move or copy each selected generated image to its expected_image_path.",
+    "Before finalizing the response, delete temporary imagegen files created during the run unless the user explicitly requested those image files as deliverables."
+  ],
+  "slides": [
+    {
+      "index": 1,
+      "title": "adsb-live",
+      "prompt_path": "/Users/jimlee/Projects/adsb-live/tmp/slides/pro-reference-images/prompts/slide-01.txt",
+      "expected_image_path": "/Users/jimlee/Projects/adsb-live/tmp/slides/pro-reference-images/slide-01.png"
+    }
+  ]
+}
